@@ -1,6 +1,7 @@
 # NanoTracer Rust
 
 A port and extension of https://github.com/ssloy/tinyraytracer by Dmitry V. Sokolov.
+Studio.exr file is taken from https://polyhaven.com/hdris.
 
 A high-performance raytracer implementation in Rust, featuring reflection, refraction, and configurable ray tracing depths. This is a Rust port of the classic tinyraytracer project with modern improvements and parallelization.
 
