@@ -8,22 +8,28 @@ use std::f32::consts::PI;
 
 use super::ShCoeffs;
 
-// Pre-computed SH normalization constants
-// Y_l^m = K_l^m * P_l^|m|(cos(theta)) * e^(im*phi)
-// For real SH: Y_l^m = K_l^m * P_l^|m|(z) * {cos(m*phi) or sin(|m|*phi)}
-
-const SH_C0: f32 = 0.28209479177387814; // 1 / (2*sqrt(pi))
-
-const SH_C1: f32 = 0.4886025119029199; // sqrt(3) / (2*sqrt(pi))
-
-const SH_C2_0: f32 = 0.31539156525252005; // sqrt(5) / (4*sqrt(pi))
-const SH_C2_1: f32 = 1.0925484305920792; // sqrt(15) / (2*sqrt(pi))
-const SH_C2_2: f32 = 0.5462742152960396; // sqrt(15) / (4*sqrt(pi))
-
-const SH_C3_0: f32 = 0.37317633259011539; // sqrt(7) / (4*sqrt(pi))
-const SH_C3_1: f32 = 0.45704579946446572; // sqrt(42) / (8*sqrt(pi))
-const SH_C3_2: f32 = 1.4453057213202769; // sqrt(105) / (4*sqrt(pi))
-const SH_C3_3: f32 = 0.5900435899266435; // sqrt(70) / (8*sqrt(pi))
+// IMPORTANT: Use the exact polynomial SH basis and constants from the reference
+// 3DGS implementation (graphdeco-inria/gaussian-splatting, utils/sh_utils.py).
+// Many viewers expect this exact convention; mixing SH conventions yields
+// psychedelic/incorrect colors.
+const SH_C0: f32 = 0.28209479177387814;
+const SH_C1: f32 = 0.4886025119029199;
+const SH_C2: [f32; 5] = [
+    1.0925484305920792,
+    -1.0925484305920792,
+    0.31539156525252005,
+    -1.0925484305920792,
+    0.5462742152960396,
+];
+const SH_C3: [f32; 7] = [
+    -0.5900435899266435,
+    2.890611442640554,
+    -0.4570457994644658,
+    0.3731763325901154,
+    -0.4570457994644658,
+    1.445305721320277,
+    -0.5900435899266435,
+];
 
 /// Evaluate real spherical harmonic basis function Y_l^m at direction (x, y, z)
 ///
@@ -33,31 +39,34 @@ pub fn sh_basis(l: u32, m: i32, dir: Vec3) -> f32 {
     let x = dir.x;
     let y = dir.y;
     let z = dir.z;
+    let xx = x * x;
+    let yy = y * y;
+    let zz = z * z;
 
     match (l, m) {
         // Degree 0 (1 function)
         (0, 0) => SH_C0,
 
         // Degree 1 (3 functions)
-        (1, -1) => SH_C1 * y,
+        (1, -1) => -SH_C1 * y,
         (1, 0) => SH_C1 * z,
-        (1, 1) => SH_C1 * x,
+        (1, 1) => -SH_C1 * x,
 
         // Degree 2 (5 functions)
-        (2, -2) => SH_C2_1 * x * y,
-        (2, -1) => SH_C2_1 * y * z,
-        (2, 0) => SH_C2_0 * (3.0 * z * z - 1.0),
-        (2, 1) => SH_C2_1 * x * z,
-        (2, 2) => SH_C2_2 * (x * x - y * y),
+        (2, -2) => SH_C2[0] * x * y,
+        (2, -1) => SH_C2[1] * y * z,
+        (2, 0) => SH_C2[2] * (2.0 * zz - xx - yy),
+        (2, 1) => SH_C2[3] * x * z,
+        (2, 2) => SH_C2[4] * (xx - yy),
 
         // Degree 3 (7 functions)
-        (3, -3) => SH_C3_3 * y * (3.0 * x * x - y * y),
-        (3, -2) => SH_C3_2 * x * y * z,
-        (3, -1) => SH_C3_1 * y * (5.0 * z * z - 1.0),
-        (3, 0) => SH_C3_0 * z * (5.0 * z * z - 3.0),
-        (3, 1) => SH_C3_1 * x * (5.0 * z * z - 1.0),
-        (3, 2) => SH_C3_2 * z * (x * x - y * y),
-        (3, 3) => SH_C3_3 * x * (x * x - 3.0 * y * y),
+        (3, -3) => SH_C3[0] * y * (3.0 * xx - yy),
+        (3, -2) => SH_C3[1] * x * y * z,
+        (3, -1) => SH_C3[2] * y * (4.0 * zz - xx - yy),
+        (3, 0) => SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy),
+        (3, 1) => SH_C3[4] * x * (4.0 * zz - xx - yy),
+        (3, 2) => SH_C3[5] * z * (xx - yy),
+        (3, 3) => SH_C3[6] * x * (xx - 3.0 * yy),
 
         _ => 0.0,
     }
@@ -115,10 +124,9 @@ pub fn fit_sh(samples: &[(Vec3, Vec3)], max_degree: u32) -> ShCoeffs {
         let dir = *dir / len_sq.sqrt();
         let basis = sh_basis_all(max_degree, dir);
 
-        // Map radiance into 3DGS feature space (shift by 0.5).
-        // Clamp to keep coefficients in a sane range for viewers.
-        let color = radiance.clamp(Vec3::ZERO, Vec3::ONE);
-        let b = color - Vec3::splat(0.5);
+        // Input is expected in sRGB space in [0, 1], matching bevy_gaussian_splatting.
+        // Map to 3DGS feature space (shift by 0.5).
+        let b = radiance.clamp(Vec3::ZERO, Vec3::ONE) - Vec3::splat(0.5);
 
         for j in 0..n_coeffs {
             let yj = basis[j];

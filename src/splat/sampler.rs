@@ -140,9 +140,9 @@ fn sample_sh_radiance(
         // Transform to world space (direction pointing away from surface)
         let world_outgoing = local_to_world(local_dir, tangent, bitangent, normal);
 
-        // 3DGS viewers typically evaluate SH with view direction pointing FROM splat TO camera.
-        // Here, `world_outgoing` points away from the surface, i.e. from point to camera.
-        let view_dir = world_outgoing.normalized();
+        // bevy_gaussian_splatting evaluates SH with `ray_direction` pointing FROM camera TO splat.
+        // Our `world_outgoing` points from point to camera, so flip it here.
+        let view_dir = (-world_outgoing).normalized();
 
         // Trace ray to estimate radiance seen from that view direction
         let radiance = trace_incoming(scene, sample, material, world_outgoing, config);
@@ -234,7 +234,37 @@ fn trace_incoming(
         );
     }
 
-    diffuse + specular + reflect_color * material.albedo[2] + refract_color * material.albedo[3]
+    tonemap_srgb(
+        diffuse
+            + specular
+            + reflect_color * material.albedo[2]
+            + refract_color * material.albedo[3],
+    )
+}
+
+fn tonemap_srgb(color_linear: Vec3) -> Vec3 {
+    // bevy_gaussian_splatting's shader reconstructs color in sRGB and then converts to linear.
+    // To match that pipeline, fit SH in sRGB space here.
+    let mapped = tonemap_reinhard(color_linear);
+    linear_to_srgb(mapped)
+}
+
+fn tonemap_reinhard(color: Vec3) -> Vec3 {
+    let c = color.max(Vec3::ZERO);
+    c / (Vec3::ONE + c)
+}
+
+fn linear_to_srgb(linear: Vec3) -> Vec3 {
+    fn channel(v: f32) -> f32 {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    Vec3::new(channel(linear.x), channel(linear.y), channel(linear.z))
 }
 
 /// Reflect direction I about normal N
