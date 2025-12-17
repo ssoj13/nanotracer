@@ -124,7 +124,7 @@ impl Gaussian {
         // Log-space scale: thin along the normal to behave like a surface (disc-like),
         // otherwise isotropic gaussians tend to look "foggy"/blurry.
         let tangent_sigma = splat_scale.max(1e-6);
-        let normal_sigma = (splat_scale * 0.15).max(1e-6);
+        let normal_sigma = (splat_scale * 0.3).max(1e-6);
         let scale = [tangent_sigma.ln(), tangent_sigma.ln(), normal_sigma.ln()];
 
         // Logit-space opacity

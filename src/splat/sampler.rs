@@ -346,7 +346,7 @@ pub fn generate_splats(scene: &Scene, config: &SplatConfig) -> Vec<Gaussian> {
     // Use override scale or auto-calculate with moderate overlap to avoid holes.
     let splat_scale = config
         .scale_override
-        .unwrap_or_else(|| estimate_scale(config.density, 1.5));
+        .unwrap_or_else(|| estimate_scale(config.density, 2.0));
     println!(
         "Splat scale: {:.4} (log: {:.4})",
         splat_scale,

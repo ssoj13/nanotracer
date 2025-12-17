@@ -14,4 +14,4 @@ target
 **/mutants.out*/
 
 *.ply
-*.cmd
+cdx*.cmd
