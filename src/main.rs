@@ -1,15 +1,15 @@
 use std::path::Path;
 
-use rayon::prelude::*;
 use clap::Parser;
-use nanotracer_rs::vec3::{Vector3, Vec3Ext};
-use nanotracer_rs::material::{IVORY, GLASS, RED_RUBBER, MIRROR};
-use nanotracer_rs::geometry::Sphere;
-use nanotracer_rs::scene::{Scene, Light};
-use nanotracer_rs::renderer::cast_ray_with_params;
-use nanotracer_rs::utils::save_image;
 use nanotracer_rs::environment::EnvironmentMap;
-use nanotracer_rs::splat::{SplatConfig, sampler::generate_splats, ply::write_ply};
+use nanotracer_rs::geometry::Sphere;
+use nanotracer_rs::material::{GLASS, IVORY, MIRROR, RED_RUBBER};
+use nanotracer_rs::renderer::cast_ray_with_params;
+use nanotracer_rs::scene::{Light, Scene};
+use nanotracer_rs::splat::{SplatConfig, ply::write_ply, sampler::generate_splats};
+use nanotracer_rs::utils::save_image;
+use nanotracer_rs::vec3::{Vec3Ext, Vector3};
+use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "nanotracer")]
@@ -95,16 +95,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const WIDTH: usize = 1024;
     const HEIGHT: usize = 768;
     const FOV: f32 = 1.05; // 60 degrees field of view in radians
-    
+
     // Create scene
     let mut scene = Scene::new();
 
     // Set up environment based on arguments
     if let Some(env_path) = &args.env_path {
-        println!("Loading HDR environment map: {} (exposure: {})", env_path, args.exposure);
+        println!(
+            "Loading HDR environment map: {} (exposure: {})",
+            env_path, args.exposure
+        );
         match EnvironmentMap::from_exr(env_path, args.exposure) {
             Ok(env_map) => {
-                println!("Loaded {}x{} HDR environment map", env_map.width(), env_map.height());
+                println!(
+                    "Loaded {}x{} HDR environment map",
+                    env_map.width(),
+                    env_map.height()
+                );
                 scene.set_environment(env_map);
             }
             Err(e) => {
@@ -116,72 +123,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Using procedural sky gradient");
         scene.set_environment(EnvironmentMap::procedural_sky());
     }
-    
+
     // Add spheres with different materials
-    scene.add_sphere(Sphere::new(
-        Vector3::new(-3.0, 0.0, -16.0),
-        2.0,
-        IVORY,
-    ));
-    
-    scene.add_sphere(Sphere::new(
-        Vector3::new(-1.0, -1.5, -12.0),
-        2.0,
-        GLASS,
-    ));
-    
-    scene.add_sphere(Sphere::new(
-        Vector3::new(1.5, -0.5, -18.0),
-        3.0,
-        RED_RUBBER,
-    ));
-    
-    scene.add_sphere(Sphere::new(
-        Vector3::new(7.0, 5.0, -18.0),
-        4.0,
-        MIRROR,
-    ));
+    scene.add_sphere(Sphere::new(Vector3::new(-3.0, 0.0, -16.0), 2.0, IVORY));
+
+    scene.add_sphere(Sphere::new(Vector3::new(-1.0, -1.5, -12.0), 2.0, GLASS));
+
+    scene.add_sphere(Sphere::new(Vector3::new(1.5, -0.5, -18.0), 3.0, RED_RUBBER));
+
+    scene.add_sphere(Sphere::new(Vector3::new(7.0, 5.0, -18.0), 4.0, MIRROR));
 
     // Add more spheres closer to camera (5-10 units away)
-    scene.add_sphere(Sphere::new(
-        Vector3::new(-2.0, 1.0, -6.0),
-        1.5,
-        MIRROR,
-    ));
+    scene.add_sphere(Sphere::new(Vector3::new(-2.0, 1.0, -6.0), 1.5, MIRROR));
 
-    scene.add_sphere(Sphere::new(
-        Vector3::new(2.5, -1.0, -7.5),
-        1.2,
-        GLASS,
-    ));
+    scene.add_sphere(Sphere::new(Vector3::new(2.5, -1.0, -7.5), 1.2, GLASS));
 
-    scene.add_sphere(Sphere::new(
-        Vector3::new(0.0, 2.5, -8.0),
-        1.0,
-        IVORY,
-    ));
+    scene.add_sphere(Sphere::new(Vector3::new(0.0, 2.5, -8.0), 1.0, IVORY));
 
-    scene.add_sphere(Sphere::new(
-        Vector3::new(-4.0, -2.0, -9.0),
-        1.8,
-        RED_RUBBER,
-    ));
+    scene.add_sphere(Sphere::new(Vector3::new(-4.0, -2.0, -9.0), 1.8, RED_RUBBER));
 
-    scene.add_sphere(Sphere::new(
-        Vector3::new(3.0, 0.5, -5.5),
-        1.0,
-        MIRROR,
-    ));
-    
+    scene.add_sphere(Sphere::new(Vector3::new(3.0, 0.5, -5.5), 1.0, MIRROR));
+
     // Add lights
     scene.add_light(Light {
         position: Vector3::new(-20.0, 20.0, 20.0),
     });
-    
+
     scene.add_light(Light {
         position: Vector3::new(30.0, 50.0, -25.0),
     });
-    
+
     scene.add_light(Light {
         position: Vector3::new(30.0, 20.0, 30.0),
     });
@@ -192,7 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Density: {} samples/unit^2", args.splat_density);
         println!("  SH samples: {}", args.sh_samples);
         println!("  SH degree: {}", args.sh_degree);
-        
+
         let config = SplatConfig {
             density: args.splat_density,
             sh_samples: args.sh_samples,
@@ -202,25 +173,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             refraction_depth: args.refraction_depth,
             scale_override: args.splat_scale,
         };
-        
+
         let gaussians = generate_splats(&scene, &config);
-        
+
         let path = Path::new(splat_path);
         println!("Writing {} gaussians to {}...", gaussians.len(), splat_path);
         write_ply(path, &gaussians)?;
-        
+
         let file_size = std::fs::metadata(path)?.len();
         println!("Splat generation complete!");
         println!("  Output: {}", splat_path);
         println!("  Gaussians: {}", gaussians.len());
         println!("  File size: {:.2} MB", file_size as f64 / 1_000_000.0);
-        
+
         return Ok(());
     }
-    
+
     // Create framebuffer
     let mut framebuffer = vec![Vector3::ZERO; WIDTH * HEIGHT];
-    
+
     // Render scene in parallel with anti-aliasing
     if args.aa_samples > 1 {
         println!("Rendering scene with {}x anti-aliasing...", args.aa_samples);
@@ -228,36 +199,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Rendering scene...");
     }
 
-    framebuffer.par_iter_mut().enumerate().for_each(|(i, pixel)| {
-        let x = i % WIDTH;
-        let y = i / WIDTH;
+    framebuffer
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, pixel)| {
+            let x = i % WIDTH;
+            let y = i / WIDTH;
 
-        let mut color = Vector3::ZERO;
+            let mut color = Vector3::ZERO;
 
-        // Anti-aliasing: sample multiple sub-pixels
-        for sample_y in 0..args.aa_samples {
-            for sample_x in 0..args.aa_samples {
-                // Jittered sub-pixel sampling
-                let jitter_x = (sample_x as f32 + 0.5) / args.aa_samples as f32;
-                let jitter_y = (sample_y as f32 + 0.5) / args.aa_samples as f32;
+            // Anti-aliasing: sample multiple sub-pixels
+            for sample_y in 0..args.aa_samples {
+                for sample_x in 0..args.aa_samples {
+                    // Jittered sub-pixel sampling
+                    let jitter_x = (sample_x as f32 + 0.5) / args.aa_samples as f32;
+                    let jitter_y = (sample_y as f32 + 0.5) / args.aa_samples as f32;
 
-                let dir_x = (x as f32 + jitter_x) - WIDTH as f32 / 2.0;
-                let dir_y = -(y as f32 + jitter_y) + HEIGHT as f32 / 2.0; // Flip image
-                let dir_z = -(HEIGHT as f32) / (2.0 * (FOV / 2.0).tan());
+                    let dir_x = (x as f32 + jitter_x) - WIDTH as f32 / 2.0;
+                    let dir_y = -(y as f32 + jitter_y) + HEIGHT as f32 / 2.0; // Flip image
+                    let dir_z = -(HEIGHT as f32) / (2.0 * (FOV / 2.0).tan());
 
-                let direction = Vector3::new(dir_x, dir_y, dir_z).normalized();
-                color += cast_ray_with_params(&scene, Vector3::ZERO, direction, 0, 0, 0, args.max_depth, args.reflection_depth, args.refraction_depth);
+                    let direction = Vector3::new(dir_x, dir_y, dir_z).normalized();
+                    color += cast_ray_with_params(
+                        &scene,
+                        Vector3::ZERO,
+                        direction,
+                        0,
+                        0,
+                        0,
+                        args.max_depth,
+                        args.reflection_depth,
+                        args.refraction_depth,
+                    );
+                }
             }
-        }
 
-        // Average all samples
-        *pixel = color / (args.aa_samples * args.aa_samples) as f32;
-    });
-    
+            // Average all samples
+            *pixel = color / (args.aa_samples * args.aa_samples) as f32;
+        });
+
     // Save image
     println!("Saving image...");
     save_image(&framebuffer, WIDTH as u32, HEIGHT as u32, "output.png")?;
-    
+
     println!("Render complete! Image saved as output.png");
     Ok(())
 }

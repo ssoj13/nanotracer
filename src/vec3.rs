@@ -16,7 +16,7 @@ pub const Z_AXIS: Vector3 = Vector3::Z;
 pub trait Vec3Ext {
     /// Calculate the norm (length) of the vector
     fn norm(&self) -> f32;
-    
+
     /// Return a normalized version of the vector
     fn normalized(&self) -> Vector3;
 }
@@ -25,7 +25,7 @@ impl Vec3Ext for Vector3 {
     fn norm(&self) -> f32 {
         self.length()
     }
-    
+
     fn normalized(&self) -> Vector3 {
         self.normalize()
     }

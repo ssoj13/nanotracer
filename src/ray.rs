@@ -1,6 +1,6 @@
 //! Ray structure and operations
 
-use crate::vec3::{Vector3, Vec3Ext};
+use crate::vec3::{Vec3Ext, Vector3};
 
 /// A ray with origin and direction
 #[derive(Debug, Clone, Copy)]
@@ -17,7 +17,7 @@ impl Ray {
             direction: direction.normalized(),
         }
     }
-    
+
     /// Get a point along the ray at distance t
     pub fn at(&self, t: f32) -> Vector3 {
         self.origin + self.direction * t

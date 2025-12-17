@@ -1,9 +1,9 @@
 //! Scene definition and intersection logic
 
-use crate::vec3::{Vector3, Vec3Ext};
+use crate::environment::{DEFAULT_SKY_COLOR, EnvironmentMap};
 use crate::geometry::{Sphere, ray_sphere_intersect};
 use crate::material::Material;
-use crate::environment::{EnvironmentMap, DEFAULT_SKY_COLOR};
+use crate::vec3::{Vec3Ext, Vector3};
 
 /// Light source in the scene
 #[derive(Debug, Clone, Copy)]
@@ -29,7 +29,7 @@ impl Intersection {
             material,
         }
     }
-    
+
     pub fn empty() -> Self {
         Self {
             hit: false,
@@ -72,15 +72,15 @@ impl Scene {
             None => DEFAULT_SKY_COLOR,
         }
     }
-    
+
     pub fn add_sphere(&mut self, sphere: Sphere) {
         self.spheres.push(sphere);
     }
-    
+
     pub fn add_light(&mut self, light: Light) {
         self.lights.push(light);
     }
-    
+
     /// Intersect a ray with the entire scene
     pub fn intersect(&self, orig: Vector3, dir: Vector3) -> Intersection {
         let mut point = Vector3::ZERO;
@@ -91,20 +91,20 @@ impl Scene {
             diffuse_color: Vector3::ZERO,
             specular_exponent: 0.0,
         };
-        
+
         let mut nearest_dist = 1e10;
-        
+
         // Intersect with checkerboard plane (y = -4)
         if dir.y.abs() > 0.001 {
             // Avoid division by zero
             let d = -(orig.y + 4.0) / dir.y;
             let p = orig + dir * d;
-            
+
             if d > 0.001 && d < nearest_dist && p.x.abs() < 10.0 && p.z < -10.0 && p.z > -30.0 {
                 nearest_dist = d;
                 point = p;
                 normal = Vector3::new(0.0, 1.0, 0.0);
-                
+
                 // Checkerboard pattern
                 let color_factor = ((0.5 * p.x + 1000.0) as i32 + (0.5 * p.z) as i32) & 1;
                 material.diffuse_color = if color_factor == 1 {
@@ -114,20 +114,20 @@ impl Scene {
                 };
             }
         }
-        
+
         // Intersect with all spheres
         for sphere in &self.spheres {
             let (intersection, d) = ray_sphere_intersect(orig, dir, sphere);
             if !intersection || d > nearest_dist {
                 continue;
             }
-            
+
             nearest_dist = d;
             point = orig + dir * nearest_dist;
             normal = (point - sphere.center).normalized();
             material = sphere.material;
         }
-        
+
         Intersection::new(nearest_dist < 1000.0, point, normal, material)
     }
 }

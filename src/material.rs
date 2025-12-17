@@ -7,13 +7,13 @@ use crate::vec3::Vector3;
 pub struct Material {
     /// Refractive index for refraction calculations
     pub refractive_index: f32,
-    
+
     /// Albedo components: diffuse, specular, reflection, refraction
     pub albedo: [f32; 4],
-    
+
     /// Diffuse color of the material
     pub diffuse_color: Vector3,
-    
+
     /// Specular exponent for Phong shading
     pub specular_exponent: f32,
 }

@@ -3,9 +3,9 @@
 //! Converts scene geometry directly to Gaussian splats with full SH coefficients.
 //! This is a forward approach (geometry -> splats) rather than inverse (images -> splats).
 
-pub mod sh;
-pub mod sampler;
 pub mod ply;
+pub mod sampler;
+pub mod sh;
 
 use glam::Vec3;
 
@@ -46,7 +46,7 @@ impl ShCoeffs {
     /// Returns 45 floats: 15 coeffs * 3 channels, ordered by channel then coefficient
     pub fn rest_interleaved(&self) -> Vec<f32> {
         let mut result = Vec::with_capacity(45);
-        
+
         // 3DGS format: all R coeffs (1-15), then all G, then all B
         for channel in 0..3 {
             for coeff_idx in 1..16.min(self.coeffs.len()) {
@@ -57,19 +57,19 @@ impl ShCoeffs {
                 result.push(0.0);
             }
         }
-        
+
         result
     }
-    
+
     /// Get normalized rest coefficients for 3DGS format
     /// Applies scaling to keep values in reasonable range
     pub fn rest_normalized(&self) -> Vec<f32> {
         let mut result = Vec::with_capacity(45);
-        
-        // Normalization: scale down higher order coeffs to prevent artifacts
-        // 3DGS expects small values for f_rest (typically -1 to 1 range)
-        let scale = 0.5;  // Conservative scaling
-        
+
+        // No scaling - pass raw SH coefficients
+        // bevy_gaussian_splatting may or may not use them
+        let scale = 1.0; // Raw coefficients
+
         // 3DGS format: all R coeffs (1-15), then all G, then all B
         for channel in 0..3 {
             for coeff_idx in 1..16 {
@@ -81,7 +81,7 @@ impl ShCoeffs {
                 }
             }
         }
-        
+
         result
     }
 }
@@ -105,35 +105,32 @@ pub struct Gaussian {
     pub rotation: [f32; 4],
 }
 
-// SH normalization constant for DC component
-const SH_C0: f32 = 0.28209479177387814;  // Y_0^0 = 1/(2*sqrt(pi))
-
 impl Gaussian {
     /// Create gaussian from surface sample and fitted SH coefficients
-    pub fn from_sample(sample: &SurfaceSample, sh: &ShCoeffs, splat_scale: f32) -> Self {
-        // Convert RGB radiance to SH DC format
-        // In 3DGS: RGB = SH_DC * C0 + 0.5, so SH_DC = (RGB - 0.5) / C0
-        let dc = sh.dc();
-        let sh_dc = [
-            (dc[0].clamp(0.0, 1.0) - 0.5) / SH_C0,
-            (dc[1].clamp(0.0, 1.0) - 0.5) / SH_C0,
-            (dc[2].clamp(0.0, 1.0) - 0.5) / SH_C0,
-        ];
-        
-        // Normalize higher order SH coefficients
-        // Scale factor to keep values in reasonable range
-        let sh_rest = sh.rest_normalized();
-        
+    pub fn from_sample(
+        sample: &SurfaceSample,
+        sh: &ShCoeffs,
+        splat_scale: f32,
+        opacity_prob: f32,
+    ) -> Self {
+        // SH coefficients in 3DGS feature space: color = 0.5 + sum_i(coeff_i * Y_i(view_dir)).
+        // `fit_sh` already solves for these coefficients, so store them directly.
+        let sh_dc = sh.dc();
+        let sh_rest = sh.rest_interleaved();
+
         // Quaternion aligning local Z to surface normal
         let rotation = quat_from_normal(sample.normal);
-        
-        // Log-space scale (isotropic for now)
-        let log_scale = splat_scale.ln();
-        let scale = [log_scale, log_scale, log_scale];
-        
-        // Logit-space opacity (0.99 -> ~4.6)
-        let opacity = logit(0.99);
-        
+
+        // Log-space scale: thin along the normal to behave like a surface (disc-like),
+        // otherwise isotropic gaussians tend to look "foggy"/blurry.
+        let tangent_sigma = splat_scale.max(1e-6);
+        let normal_sigma = (splat_scale * 0.15).max(1e-6);
+        let scale = [tangent_sigma.ln(), tangent_sigma.ln(), normal_sigma.ln()];
+
+        // Logit-space opacity
+        let opacity_p = opacity_prob.clamp(1e-4, 1.0 - 1e-4);
+        let opacity = logit(opacity_p);
+
         Self {
             pos: sample.pos,
             normal: sample.normal,
@@ -150,7 +147,7 @@ impl Gaussian {
 fn quat_from_normal(normal: Vec3) -> [f32; 4] {
     let z = Vec3::Z;
     let n = normal.normalize();
-    
+
     // Handle case when normal is parallel to Z
     let dot = z.dot(n);
     if dot > 0.99999 {
@@ -160,15 +157,15 @@ fn quat_from_normal(normal: Vec3) -> [f32; 4] {
         // 180 degree rotation around X axis
         return [0.0, 1.0, 0.0, 0.0];
     }
-    
+
     // Cross product gives rotation axis
     let axis = z.cross(n).normalize();
     let angle = dot.acos();
     let half_angle = angle * 0.5;
-    
+
     let s = half_angle.sin();
     let c = half_angle.cos();
-    
+
     // Quaternion (w, x, y, z)
     [c, axis.x * s, axis.y * s, axis.z * s]
 }

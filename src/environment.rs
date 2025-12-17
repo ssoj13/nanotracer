@@ -44,9 +44,18 @@ impl EnvironmentMap {
         let data = image.layer_data.channel_data.pixels;
 
         // Debug: Print some statistics about the HDR data
-        let max_luminance = data.iter().map(|v| v.x.max(v.y).max(v.z)).fold(0.0f32, f32::max);
-        let min_luminance = data.iter().map(|v| v.x.min(v.y).min(v.z)).fold(f32::INFINITY, f32::min);
-        println!("HDR stats: min={:.3}, max={:.3}", min_luminance, max_luminance);
+        let max_luminance = data
+            .iter()
+            .map(|v| v.x.max(v.y).max(v.z))
+            .fold(0.0f32, f32::max);
+        let min_luminance = data
+            .iter()
+            .map(|v| v.x.min(v.y).min(v.z))
+            .fold(f32::INFINITY, f32::min);
+        println!(
+            "HDR stats: min={:.3}, max={:.3}",
+            min_luminance, max_luminance
+        );
 
         Ok(Self {
             data,
@@ -74,8 +83,8 @@ impl EnvironmentMap {
         let dir = dir.normalize();
 
         // Convert to spherical coordinates
-        let phi = dir.z.atan2(dir.x);  // Azimuth angle [-π, π]
-        let theta = (-dir.y).acos();   // Polar angle [0, π] (from +Y down)
+        let phi = dir.z.atan2(dir.x); // Azimuth angle [-π, π]
+        let theta = (-dir.y).acos(); // Polar angle [0, π] (from +Y down)
 
         // Convert to UV coordinates [0,1]
         let u = (phi / (2.0 * PI) + 0.5) % 1.0;
