@@ -1,16 +1,45 @@
+use std::path::Path;
+
 use rayon::prelude::*;
 use clap::Parser;
-use nanotracer::vec3::{Vector3, Vec3Ext};
-use nanotracer::material::{IVORY, GLASS, RED_RUBBER, MIRROR};
-use nanotracer::geometry::Sphere;
-use nanotracer::scene::{Scene, Light};
-use nanotracer::renderer::cast_ray_with_params;
-use nanotracer::utils::save_image;
-use nanotracer::environment::EnvironmentMap;
+use nanotracer_rs::vec3::{Vector3, Vec3Ext};
+use nanotracer_rs::material::{IVORY, GLASS, RED_RUBBER, MIRROR};
+use nanotracer_rs::geometry::Sphere;
+use nanotracer_rs::scene::{Scene, Light};
+use nanotracer_rs::renderer::cast_ray_with_params;
+use nanotracer_rs::utils::save_image;
+use nanotracer_rs::environment::EnvironmentMap;
+use nanotracer_rs::splat::{SplatConfig, sampler::generate_splats, ply::write_ply};
 
 #[derive(Parser)]
 #[command(name = "nanotracer")]
-#[command(about = "A simple raytracer")]
+#[command(about = "A path tracer with Gaussian Splatting export")]
+#[command(after_help = r#"EXAMPLES:
+  Rendering:
+    nanotracer-rs                           # Basic render, output.png
+    nanotracer-rs -a 4                       # 4x anti-aliasing
+    nanotracer-rs -a 8 -s                    # 8x AA + procedural sky
+    nanotracer-rs -n hdr.exr -e 0.5          # HDR environment, exposure 0.5
+    nanotracer-rs -a 4 -m 64 -r 8 -f 20      # High quality: more bounces
+
+  Gaussian Splats (fast preview):
+    nanotracer-rs -S test.ply --splat-density 50 --sh-samples 16
+
+  Gaussian Splats (balanced):
+    nanotracer-rs -S scene.ply --splat-density 200 --sh-samples 64
+
+  Gaussian Splats (high quality):
+    nanotracer-rs -S hq.ply --splat-density 500 --sh-samples 128
+
+  Gaussian Splats (sharp, small splats):
+    nanotracer-rs -S sharp.ply --splat-density 300 --splat-scale 0.03
+
+  Gaussian Splats (diffuse only, faster):
+    nanotracer-rs -S diffuse.ply --splat-density 200 --sh-degree 0
+
+  Gaussian Splats with HDR lighting:
+    nanotracer-rs -S lit.ply -n studio.exr --splat-density 200
+"#)]
 struct Args {
     /// Maximum recursion depth
     #[arg(short = 'm', long = "max", default_value_t = 32)]
@@ -39,6 +68,26 @@ struct Args {
     /// Anti-aliasing samples per pixel
     #[arg(short = 'a', long = "aa", default_value_t = 1)]
     aa_samples: u32,
+
+    /// Export Gaussian splats to PLY file (skips image rendering)
+    #[arg(short = 'S', long = "splats")]
+    splat_output: Option<String>,
+
+    /// SH sampling directions per splat (default: 64)
+    #[arg(long = "sh-samples", default_value_t = 64)]
+    sh_samples: usize,
+
+    /// Surface samples per unit area (default: 100)
+    #[arg(long = "splat-density", default_value_t = 100.0)]
+    splat_density: f32,
+
+    /// Maximum SH degree 0-3 (default: 3)
+    #[arg(long = "sh-degree", default_value_t = 3)]
+    sh_degree: u32,
+
+    /// Override splat scale (radius). Auto-calculated from density if not set
+    #[arg(long = "splat-scale")]
+    splat_scale: Option<f32>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -136,6 +185,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     scene.add_light(Light {
         position: Vector3::new(30.0, 20.0, 30.0),
     });
+
+    // Check if we should generate splats instead of rendering
+    if let Some(splat_path) = &args.splat_output {
+        println!("Generating Gaussian splats...");
+        println!("  Density: {} samples/unit^2", args.splat_density);
+        println!("  SH samples: {}", args.sh_samples);
+        println!("  SH degree: {}", args.sh_degree);
+        
+        let config = SplatConfig {
+            density: args.splat_density,
+            sh_samples: args.sh_samples,
+            sh_degree: args.sh_degree.min(3),
+            max_depth: args.max_depth,
+            reflection_depth: args.reflection_depth,
+            refraction_depth: args.refraction_depth,
+            scale_override: args.splat_scale,
+        };
+        
+        let gaussians = generate_splats(&scene, &config);
+        
+        let path = Path::new(splat_path);
+        println!("Writing {} gaussians to {}...", gaussians.len(), splat_path);
+        write_ply(path, &gaussians)?;
+        
+        let file_size = std::fs::metadata(path)?.len();
+        println!("Splat generation complete!");
+        println!("  Output: {}", splat_path);
+        println!("  Gaussians: {}", gaussians.len());
+        println!("  File size: {:.2} MB", file_size as f64 / 1_000_000.0);
+        
+        return Ok(());
+    }
     
     // Create framebuffer
     let mut framebuffer = vec![Vector3::ZERO; WIDTH * HEIGHT];

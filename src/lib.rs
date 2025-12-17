@@ -6,3 +6,4 @@ pub mod scene;
 pub mod renderer;
 pub mod utils;
 pub mod environment;
+pub mod splat;
