@@ -93,20 +93,24 @@ pub fn fit_sh(samples: &[(Vec3, Vec3)], max_degree: u32) -> ShCoeffs {
         return ShCoeffs { coeffs, degree: max_degree };
     }
     
-    // Monte Carlo integration weight
-    // For hemisphere: integral of Y_lm over hemisphere = 2*pi (solid angle)
-    // Weight = (2*pi) / N for hemisphere, (4*pi) / N for full sphere
-    // Using hemisphere sampling, so 2*pi
-    let weight = 2.0 * PI / samples.len() as f32;
+    let n = samples.len() as f32;
     
+    // For uniform hemisphere sampling:
+    // Integral approximation: (2*pi / N) * sum(f(w) * Y_lm(w))
+    // But we need to be careful about the normalization
+    
+    // Simple approach: just average the radiance weighted by SH basis
+    // This gives us coefficients that reconstruct the function
     for (dir, radiance) in samples {
         let basis = sh_basis_all(max_degree, *dir);
         
         for (idx, &b) in basis.iter().enumerate() {
-            let weighted = b * weight;
-            coeffs[idx][0] += radiance.x * weighted;
-            coeffs[idx][1] += radiance.y * weighted;
-            coeffs[idx][2] += radiance.z * weighted;
+            // Weight by solid angle of hemisphere / N samples
+            // For hemisphere: 2*pi steradians
+            let weight = 2.0 * PI / n;
+            coeffs[idx][0] += radiance.x * b * weight;
+            coeffs[idx][1] += radiance.y * b * weight;
+            coeffs[idx][2] += radiance.z * b * weight;
         }
     }
     

@@ -43,22 +43,42 @@ impl ShCoeffs {
     }
 
     /// Get rest coefficients (degrees 1-3, indices 1-15)
-    /// Returns 45 floats: 15 coeffs * 3 channels, interleaved by coefficient
+    /// Returns 45 floats: 15 coeffs * 3 channels, ordered by channel then coefficient
     pub fn rest_interleaved(&self) -> Vec<f32> {
-        // PLY format expects: f_rest_0..f_rest_44
-        // where f_rest_{i} corresponds to coefficient (i/3 + 1) for channel (i % 3)
-        // Actually 3DGS uses: all R coeffs, then all G, then all B
         let mut result = Vec::with_capacity(45);
         
-        // For each channel
+        // 3DGS format: all R coeffs (1-15), then all G, then all B
         for channel in 0..3 {
-            // Coefficients 1-15 (skip DC)
             for coeff_idx in 1..16.min(self.coeffs.len()) {
                 result.push(self.coeffs[coeff_idx][channel]);
             }
             // Pad with zeros if degree < 3
             for _ in self.coeffs.len()..16 {
                 result.push(0.0);
+            }
+        }
+        
+        result
+    }
+    
+    /// Get normalized rest coefficients for 3DGS format
+    /// Applies scaling to keep values in reasonable range
+    pub fn rest_normalized(&self) -> Vec<f32> {
+        let mut result = Vec::with_capacity(45);
+        
+        // Normalization: scale down higher order coeffs to prevent artifacts
+        // 3DGS expects small values for f_rest (typically -1 to 1 range)
+        let scale = 0.5;  // Conservative scaling
+        
+        // 3DGS format: all R coeffs (1-15), then all G, then all B
+        for channel in 0..3 {
+            for coeff_idx in 1..16 {
+                if coeff_idx < self.coeffs.len() {
+                    // Apply scaling to higher orders
+                    result.push(self.coeffs[coeff_idx][channel] * scale);
+                } else {
+                    result.push(0.0);
+                }
             }
         }
         
@@ -85,11 +105,24 @@ pub struct Gaussian {
     pub rotation: [f32; 4],
 }
 
+// SH normalization constant for DC component
+const SH_C0: f32 = 0.28209479177387814;  // Y_0^0 = 1/(2*sqrt(pi))
+
 impl Gaussian {
     /// Create gaussian from surface sample and fitted SH coefficients
     pub fn from_sample(sample: &SurfaceSample, sh: &ShCoeffs, splat_scale: f32) -> Self {
-        let sh_dc = sh.dc();
-        let sh_rest = sh.rest_interleaved();
+        // Convert RGB radiance to SH DC format
+        // In 3DGS: RGB = SH_DC * C0 + 0.5, so SH_DC = (RGB - 0.5) / C0
+        let dc = sh.dc();
+        let sh_dc = [
+            (dc[0].clamp(0.0, 1.0) - 0.5) / SH_C0,
+            (dc[1].clamp(0.0, 1.0) - 0.5) / SH_C0,
+            (dc[2].clamp(0.0, 1.0) - 0.5) / SH_C0,
+        ];
+        
+        // Normalize higher order SH coefficients
+        // Scale factor to keep values in reasonable range
+        let sh_rest = sh.rest_normalized();
         
         // Quaternion aligning local Z to surface normal
         let rotation = quat_from_normal(sample.normal);
