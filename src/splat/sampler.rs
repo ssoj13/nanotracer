@@ -14,6 +14,23 @@ use crate::vec3::Vec3Ext;
 use super::sh::{fibonacci_hemisphere, fit_sh};
 use super::{Gaussian, SplatConfig, SurfaceSample};
 
+fn fibonacci_sphere_dir(i: usize, n: usize, theta_offset: f32) -> Vec3 {
+    debug_assert!(n > 0);
+    let n_f = n as f32;
+    let i_f = i as f32;
+
+    // Uniform distribution on sphere via Fibonacci lattice.
+    // z in [-1, 1] (using z as "up" in local frame).
+    let z = 1.0 - 2.0 * (i_f + 0.5) / n_f;
+    let r = (1.0 - z * z).max(0.0).sqrt();
+
+    // Golden angle (radians)
+    let golden_angle = PI * (3.0 - 5.0_f32.sqrt());
+    let theta = theta_offset + golden_angle * i_f;
+
+    Vec3::new(r * theta.cos(), r * theta.sin(), z)
+}
+
 /// Sample all surfaces in the scene uniformly
 pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
     let mut samples = Vec::new();
@@ -23,9 +40,10 @@ pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
     for sphere in &scene.spheres {
         let area = 4.0 * PI * sphere.radius * sphere.radius;
         let n_samples = (area * config.density).ceil() as usize;
+        let theta_offset = rng.f32() * 2.0 * PI;
 
-        for _ in 0..n_samples {
-            let dir = uniform_sphere(&mut rng);
+        for i in 0..n_samples {
+            let dir = fibonacci_sphere_dir(i, n_samples.max(1), theta_offset);
             let pos = sphere.center + dir * sphere.radius;
 
             // Offset slightly outward to avoid self-intersection
@@ -79,22 +97,6 @@ pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
     }
 
     samples
-}
-
-/// Generate uniform random point on unit sphere
-fn uniform_sphere(rng: &mut fastrand::Rng) -> Vec3 {
-    // Use rejection sampling for simplicity
-    loop {
-        let x = rng.f32() * 2.0 - 1.0;
-        let y = rng.f32() * 2.0 - 1.0;
-        let z = rng.f32() * 2.0 - 1.0;
-
-        let len_sq = x * x + y * y + z * z;
-        if len_sq > 0.0001 && len_sq <= 1.0 {
-            let len = len_sq.sqrt();
-            return Vec3::new(x / len, y / len, z / len);
-        }
-    }
 }
 
 /// Build tangent frame from normal vector
