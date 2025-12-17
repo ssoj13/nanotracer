@@ -1,30 +1,27 @@
 //! Geometry sampling for Gaussian splat generation
-//!
-//! Samples surfaces from ALL directions, not just camera view.
-//! Each sample becomes a Gaussian splat with SH-encoded view-dependent color.
 
 use glam::Vec3;
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
+use crate::geometry::{Geometry, Object};
+use crate::material::Material;
+use crate::mesh::Mesh;
 use crate::renderer::cast_ray_with_params;
 use crate::scene::Scene;
-use crate::vec3::Vec3Ext;
 
 use super::sh::{fibonacci_hemisphere, fit_sh};
 use super::{Gaussian, SplatConfig, SurfaceSample};
 
+/// Fibonacci sphere direction sampling
 fn fibonacci_sphere_dir(i: usize, n: usize, theta_offset: f32) -> Vec3 {
     debug_assert!(n > 0);
     let n_f = n as f32;
     let i_f = i as f32;
 
-    // Uniform distribution on sphere via Fibonacci lattice.
-    // z in [-1, 1] (using z as "up" in local frame).
     let z = 1.0 - 2.0 * (i_f + 0.5) / n_f;
     let r = (1.0 - z * z).max(0.0).sqrt();
 
-    // Golden angle (radians)
     let golden_angle = PI * (3.0 - 5.0_f32.sqrt());
     let theta = theta_offset + golden_angle * i_f;
 
@@ -36,28 +33,151 @@ pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
     let mut samples = Vec::new();
     let mut rng = fastrand::Rng::new();
 
-    // Sample spheres
-    for sphere in &scene.spheres {
-        let area = 4.0 * PI * sphere.radius * sphere.radius;
-        let n_samples = (area * config.density).ceil() as usize;
-        let theta_offset = rng.f32() * 2.0 * PI;
-
-        for i in 0..n_samples {
-            let dir = fibonacci_sphere_dir(i, n_samples.max(1), theta_offset);
-            let pos = sphere.center + dir * sphere.radius;
-
-            // Offset slightly outward to avoid self-intersection
-            let pos = pos + dir * 0.001;
-
-            samples.push(SurfaceSample {
-                pos,
-                normal: dir,
-                material_color: sphere.material.diffuse_color,
-            });
-        }
+    // Sample all objects (new system)
+    for object in &scene.objects {
+        sample_object(object, config.density, &mut rng, &mut samples);
     }
 
-    // Sample checkerboard plane (y = -4, x in [-10, 10], z in [-30, -10])
+    // Sample legacy spheres
+    for sphere in &scene.spheres {
+        sample_sphere(
+            sphere.center,
+            sphere.radius,
+            sphere.material,
+            config.density,
+            &mut rng,
+            &mut samples,
+        );
+    }
+
+    // Sample checkerboard plane if enabled
+    if scene.checkerboard_enabled {
+        sample_checkerboard(config.density, &mut rng, &mut samples);
+    }
+
+    samples
+}
+
+/// Sample an object based on its geometry type
+fn sample_object(
+    object: &Object,
+    density: f32,
+    rng: &mut fastrand::Rng,
+    samples: &mut Vec<SurfaceSample>,
+) {
+    match &object.geometry {
+        Geometry::Sphere { center, radius } => {
+            sample_sphere(*center, *radius, object.material, density, rng, samples);
+        }
+        Geometry::Mesh(mesh) => {
+            sample_mesh(mesh, object.material, density, rng, samples);
+        }
+    }
+}
+
+/// Sample a sphere surface
+fn sample_sphere(
+    center: Vec3,
+    radius: f32,
+    material: Material,
+    density: f32,
+    rng: &mut fastrand::Rng,
+    samples: &mut Vec<SurfaceSample>,
+) {
+    let area = 4.0 * PI * radius * radius;
+    let n_samples = (area * density).ceil() as usize;
+    let theta_offset = rng.f32() * 2.0 * PI;
+
+    for i in 0..n_samples {
+        let dir = fibonacci_sphere_dir(i, n_samples.max(1), theta_offset);
+        let pos = center + dir * radius;
+        let pos = pos + dir * 0.001; // offset to avoid self-intersection
+
+        samples.push(SurfaceSample {
+            pos,
+            normal: dir,
+            material,
+        });
+    }
+}
+
+/// Sample a mesh surface using area-weighted triangle selection
+fn sample_mesh(
+    mesh: &Mesh,
+    material: Material,
+    density: f32,
+    rng: &mut fastrand::Rng,
+    samples: &mut Vec<SurfaceSample>,
+) {
+    if mesh.indices.is_empty() {
+        return;
+    }
+
+    // Compute triangle areas and build CDF
+    let mut areas: Vec<f32> = Vec::with_capacity(mesh.indices.len());
+    let mut total_area = 0.0;
+
+    for tri in &mesh.indices {
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+
+        let area = (v1 - v0).cross(v2 - v0).length() * 0.5;
+        total_area += area;
+        areas.push(total_area);
+    }
+
+    if total_area < 1e-8 {
+        return;
+    }
+
+    let n_samples = (total_area * density).ceil() as usize;
+
+    for _ in 0..n_samples {
+        // Select triangle by area (CDF sampling)
+        let r = rng.f32() * total_area;
+        let tri_idx = areas.partition_point(|&a| a < r).min(areas.len() - 1);
+
+        let tri = &mesh.indices[tri_idx];
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+
+        // Uniform barycentric sampling
+        let mut u = rng.f32();
+        let mut v = rng.f32();
+        if u + v > 1.0 {
+            u = 1.0 - u;
+            v = 1.0 - v;
+        }
+        let w = 1.0 - u - v;
+
+        let pos = v0 * w + v1 * u + v2 * v;
+
+        // Interpolate normal if available
+        let normal = if mesh.normals.len() == mesh.vertices.len() {
+            let n0 = mesh.normals[tri[0] as usize];
+            let n1 = mesh.normals[tri[1] as usize];
+            let n2 = mesh.normals[tri[2] as usize];
+            (n0 * w + n1 * u + n2 * v).normalize()
+        } else {
+            // Face normal
+            (v1 - v0).cross(v2 - v0).normalize()
+        };
+
+        // Offset slightly along normal
+        let pos = pos + normal * 0.001;
+
+        samples.push(SurfaceSample {
+            pos,
+            normal,
+            material,
+        });
+    }
+}
+
+/// Sample checkerboard plane (y = -4, x in [-10, 10], z in [-30, -10])
+fn sample_checkerboard(density: f32, rng: &mut fastrand::Rng, samples: &mut Vec<SurfaceSample>) {
     let plane_y = -4.0;
     let plane_x_range = (-10.0, 10.0);
     let plane_z_range = (-30.0, -10.0);
@@ -65,9 +185,8 @@ pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
     let plane_width = plane_x_range.1 - plane_x_range.0;
     let plane_depth = plane_z_range.1 - plane_z_range.0;
     let plane_area = plane_width * plane_depth;
-    let n_plane_samples = (plane_area * config.density).ceil() as usize;
+    let n_plane_samples = (plane_area * density).ceil() as usize;
 
-    // Grid-based sampling with jitter for plane
     let samples_per_side = (n_plane_samples as f32).sqrt().ceil() as usize;
     let dx = plane_width / samples_per_side as f32;
     let dz = plane_depth / samples_per_side as f32;
@@ -80,7 +199,6 @@ pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
             let x = plane_x_range.0 + (i as f32 + 0.5 + jitter_x * 0.8) * dx;
             let z = plane_z_range.0 + (j as f32 + 0.5 + jitter_z * 0.8) * dz;
 
-            // Checkerboard color
             let checker = ((0.5 * x + 1000.0) as i32 + (0.5 * z) as i32) & 1;
             let color = if checker == 1 {
                 Vec3::new(0.3, 0.3, 0.3)
@@ -88,22 +206,26 @@ pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
                 Vec3::new(0.3, 0.2, 0.1)
             };
 
+            let material = Material {
+                refractive_index: 1.0,
+                albedo: [0.9, 0.1, 0.0, 0.0],
+                diffuse_color: color,
+                specular_exponent: 10.0,
+            };
+
             samples.push(SurfaceSample {
                 pos: Vec3::new(x, plane_y + 0.001, z),
-                normal: Vec3::Y, // Plane normal is up
-                material_color: color,
+                normal: Vec3::Y,
+                material,
             });
         }
     }
-
-    samples
 }
 
 /// Build tangent frame from normal vector
 fn tangent_frame(normal: Vec3) -> (Vec3, Vec3, Vec3) {
     let n = normal.normalize();
 
-    // Choose tangent that's not parallel to normal
     let tangent = if n.y.abs() < 0.9 {
         n.cross(Vec3::Y).normalize()
     } else {
@@ -121,33 +243,21 @@ fn local_to_world(local: Vec3, tangent: Vec3, bitangent: Vec3, normal: Vec3) -> 
 }
 
 /// Sample incoming radiance at a surface point for SH fitting
-///
-/// Traces rays in multiple directions on the hemisphere above the surface
-/// and computes the radiance that would be seen from each direction.
 fn sample_sh_radiance(
     scene: &Scene,
     sample: &SurfaceSample,
-    material: &MaterialInfo,
     config: &SplatConfig,
 ) -> Vec<(Vec3, Vec3)> {
-    // Get hemisphere directions in local space
     let local_dirs = fibonacci_hemisphere(config.sh_samples);
-
-    // Build tangent frame
     let (tangent, bitangent, normal) = tangent_frame(sample.normal);
 
     let mut radiance_samples = Vec::with_capacity(config.sh_samples);
 
     for local_dir in local_dirs {
-        // Transform to world space (direction pointing away from surface)
         let world_outgoing = local_to_world(local_dir, tangent, bitangent, normal);
+        let view_dir = -world_outgoing.normalize();
 
-        // bevy_gaussian_splatting evaluates SH with `ray_direction` pointing FROM camera TO splat.
-        // Our `world_outgoing` points from point to camera, so flip it here.
-        let view_dir = (-world_outgoing).normalized();
-
-        // Trace ray to estimate radiance seen from that view direction
-        let radiance = trace_incoming(scene, sample, material, world_outgoing, config);
+        let radiance = trace_incoming(scene, sample, world_outgoing, config);
 
         radiance_samples.push((view_dir, radiance));
     }
@@ -159,55 +269,42 @@ fn sample_sh_radiance(
 fn trace_incoming(
     scene: &Scene,
     sample: &SurfaceSample,
-    material: &MaterialInfo,
     outgoing_dir: Vec3,
     config: &SplatConfig,
 ) -> Vec3 {
-    // We want the radiance that arrives at this point from direction `outgoing_dir`
-    // This is like asking: if a camera is at infinity in direction `outgoing_dir`,
-    // what color does it see at this point?
-
-    // For a simple approach: compute the shading at this point for a "virtual camera"
-    // positioned along `outgoing_dir`
-
-    // The incoming ray direction (from camera to point) is -outgoing_dir
     let incoming_dir = -outgoing_dir.normalize();
+    let material = &sample.material;
 
-    // Compute lighting similar to cast_ray but at a known point
     let mut diffuse_intensity = 0.0;
     let mut specular_intensity = 0.0;
 
     for light in &scene.lights {
-        let light_dir = (light.position - sample.pos).normalized();
+        let light_dir = (light.position - sample.pos).normalize();
 
         // Shadow test
         let shadow_hit = scene.intersect(sample.pos, light_dir);
         if shadow_hit.hit
-            && (shadow_hit.point - sample.pos).norm() < (light.position - sample.pos).norm()
+            && (shadow_hit.point - sample.pos).length() < (light.position - sample.pos).length()
         {
             continue;
         }
 
-        // Diffuse
         diffuse_intensity += light_dir.dot(sample.normal).max(0.0);
 
-        // Specular (Phong)
         let reflect_dir = reflect(-light_dir, sample.normal);
         specular_intensity += (-reflect_dir.dot(incoming_dir))
             .max(0.0)
             .powf(material.specular_exponent);
     }
 
-    // Combine components
-    let diffuse = sample.material_color * diffuse_intensity * material.albedo[0];
+    let diffuse = material.diffuse_color * diffuse_intensity * material.albedo[0];
     let specular = Vec3::ONE * specular_intensity * material.albedo[1];
 
-    // For reflective/refractive materials, trace secondary rays
     let mut reflect_color = Vec3::ZERO;
     let mut refract_color = Vec3::ZERO;
 
     if material.albedo[2] > 0.0 {
-        let reflect_dir = reflect(incoming_dir, sample.normal).normalized();
+        let reflect_dir = reflect(incoming_dir, sample.normal).normalize();
         reflect_color = cast_ray_with_params(
             scene,
             sample.pos,
@@ -226,7 +323,7 @@ fn trace_incoming(
         refract_color = cast_ray_with_params(
             scene,
             sample.pos,
-            refract_dir.normalized(),
+            refract_dir.normalize(),
             0,
             0,
             0,
@@ -245,8 +342,6 @@ fn trace_incoming(
 }
 
 fn tonemap_srgb(color_linear: Vec3) -> Vec3 {
-    // bevy_gaussian_splatting's shader reconstructs color in sRGB and then converts to linear.
-    // To match that pipeline, fit SH in sRGB space here.
     let mapped = tonemap_reinhard(color_linear);
     linear_to_srgb(mapped)
 }
@@ -287,55 +382,24 @@ fn refract(i: Vec3, n: Vec3, eta_t: f32, eta_i: f32) -> Vec3 {
     let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
 
     if k < 0.0 {
-        // Total internal reflection -> reflect
         reflect(i, n)
     } else {
         i * eta + n * (eta * cosi - k.sqrt())
     }
 }
 
-/// Material info helper struct
-#[derive(Clone, Copy)]
-struct MaterialInfo {
-    albedo: [f32; 4],
-    specular_exponent: f32,
-    refractive_index: f32,
-}
-
-/// Find material properties at a sample point
-fn find_material_at_point(scene: &Scene, sample: &SurfaceSample) -> MaterialInfo {
-    // Check which object this sample belongs to (by proximity)
-    for sphere in &scene.spheres {
-        let dist = (sample.pos - sphere.center).length();
-        if (dist - sphere.radius).abs() < 0.1 {
-            return MaterialInfo {
-                albedo: sphere.material.albedo,
-                specular_exponent: sphere.material.specular_exponent,
-                refractive_index: sphere.material.refractive_index,
-            };
-        }
+fn opacity_for_material(material: &Material) -> f32 {
+    if material.albedo[3] > 0.0 {
+        0.15
+    } else {
+        0.98
     }
-
-    // Default: checkerboard plane
-    MaterialInfo {
-        albedo: [0.9, 0.1, 0.0, 0.0],
-        specular_exponent: 10.0,
-        refractive_index: 1.0,
-    }
-}
-
-fn opacity_for_material(material: &MaterialInfo) -> f32 {
-    // Glass needs to be partially transparent to look like glass in splat renderers.
-    // Opaque materials can stay close to 1.0.
-    if material.albedo[3] > 0.0 { 0.15 } else { 0.98 }
 }
 
 /// Estimate splat scale from sampling density
 fn estimate_scale(density: f32, overlap: f32) -> f32 {
-    // Base radius from area per sample
     let area_per_sample = 1.0 / density;
     let base_radius = (area_per_sample / PI).sqrt();
-
     base_radius * overlap
 }
 
@@ -345,7 +409,6 @@ pub fn generate_splats(scene: &Scene, config: &SplatConfig) -> Vec<Gaussian> {
     let samples = sample_scene(scene, config);
     println!("Generated {} surface samples", samples.len());
 
-    // Use override scale or auto-calculate with moderate overlap to avoid holes.
     let splat_scale = config
         .scale_override
         .unwrap_or_else(|| estimate_scale(config.density, 2.0));
@@ -360,21 +423,17 @@ pub fn generate_splats(scene: &Scene, config: &SplatConfig) -> Vec<Gaussian> {
         config.sh_samples, config.sh_degree
     );
 
-    // Process samples in parallel
     let gaussians: Vec<Gaussian> = samples
         .par_iter()
         .enumerate()
         .map(|(i, sample)| {
             if i % 1000 == 0 {
-                // Progress indication (approximate due to parallel)
                 eprint!("\rProcessing splat {}/{}...", i, samples.len());
             }
 
-            let material = find_material_at_point(scene, sample);
-            let opacity = opacity_for_material(&material);
+            let opacity = opacity_for_material(&sample.material);
 
-            // Sample hemisphere and fit SH
-            let radiance_samples = sample_sh_radiance(scene, sample, &material, config);
+            let radiance_samples = sample_sh_radiance(scene, sample, config);
             let sh = fit_sh(&radiance_samples, config.sh_degree);
 
             Gaussian::from_sample(sample, &sh, splat_scale, opacity)

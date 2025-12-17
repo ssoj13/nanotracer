@@ -1,6 +1,7 @@
 pub mod environment;
 pub mod geometry;
 pub mod material;
+pub mod mesh;
 pub mod ray;
 pub mod renderer;
 pub mod scene;

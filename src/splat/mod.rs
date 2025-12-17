@@ -9,12 +9,14 @@ pub mod sh;
 
 use glam::Vec3;
 
+use crate::material::Material;
+
 /// Surface sample from geometry
 #[derive(Debug, Clone, Copy)]
 pub struct SurfaceSample {
     pub pos: Vec3,
     pub normal: Vec3,
-    pub material_color: Vec3,
+    pub material: Material,
 }
 
 /// Spherical harmonics coefficients up to degree 3

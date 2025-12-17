@@ -1,7 +1,8 @@
 //! Ray casting and rendering logic
 
+use glam::Vec3;
+
 use crate::scene::Scene;
-use crate::vec3::{Vec3Ext, Vector3};
 
 /// Maximum recursion depth for ray tracing
 pub const MAX_DEPTH: i32 = 16;
@@ -11,17 +12,14 @@ pub const MAX_REFLECTION_DEPTH: i32 = 4;
 pub const MAX_REFRACTION_DEPTH: i32 = 10;
 
 /// Reflect a ray direction I about normal N
-pub fn reflect(i: Vector3, n: Vector3) -> Vector3 {
+pub fn reflect(i: Vec3, n: Vec3) -> Vec3 {
     i - n * 2.0 * i.dot(n)
 }
 
 /// Refract a ray direction I through surface with normal N
-/// eta_t: refractive index of transmitted medium
-/// eta_i: refractive index of incident medium (default: 1.0 for air)
-pub fn refract(i: Vector3, n: Vector3, eta_t: f32, eta_i: f32) -> Vector3 {
-    let cosi = -((-1.0_f32).max((1.0_f32).min(i.dot(n))));
+pub fn refract(i: Vec3, n: Vec3, eta_t: f32, eta_i: f32) -> Vec3 {
+    let cosi = -i.dot(n).clamp(-1.0, 1.0);
     if cosi < 0.0 {
-        // Ray comes from inside the object, swap media
         return refract(i, -n, eta_i, eta_t);
     }
 
@@ -29,15 +27,14 @@ pub fn refract(i: Vector3, n: Vector3, eta_t: f32, eta_i: f32) -> Vector3 {
     let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
 
     if k < 0.0 {
-        // Total internal reflection, return a special value
-        return Vector3::new(1.0, 0.0, 0.0);
+        Vec3::new(1.0, 0.0, 0.0) // Total internal reflection
     } else {
-        return i * eta + n * (eta * cosi - k.sqrt());
+        i * eta + n * (eta * cosi - k.sqrt())
     }
 }
 
 /// Cast a ray into the scene and return the computed color
-pub fn cast_ray(scene: &Scene, orig: Vector3, dir: Vector3, depth: i32) -> Vector3 {
+pub fn cast_ray(scene: &Scene, orig: Vec3, dir: Vec3, depth: i32) -> Vec3 {
     cast_ray_with_separate_depths(
         scene,
         orig,
@@ -54,15 +51,15 @@ pub fn cast_ray(scene: &Scene, orig: Vector3, dir: Vector3, depth: i32) -> Vecto
 /// Cast a ray with configurable depth parameters
 pub fn cast_ray_with_params(
     scene: &Scene,
-    orig: Vector3,
-    dir: Vector3,
+    orig: Vec3,
+    dir: Vec3,
     depth: i32,
     reflection_depth: i32,
     refraction_depth: i32,
     max_depth: i32,
     max_reflection_depth: i32,
     max_refraction_depth: i32,
-) -> Vector3 {
+) -> Vec3 {
     cast_ray_with_separate_depths(
         scene,
         orig,
@@ -79,34 +76,32 @@ pub fn cast_ray_with_params(
 /// Cast a ray with separate tracking for reflection and refraction depths
 fn cast_ray_with_separate_depths(
     scene: &Scene,
-    orig: Vector3,
-    dir: Vector3,
+    orig: Vec3,
+    dir: Vec3,
     depth: i32,
     reflection_depth: i32,
     refraction_depth: i32,
     max_depth: i32,
     max_reflection_depth: i32,
     max_refraction_depth: i32,
-) -> Vector3 {
-    // Safety check to prevent infinite recursion
+) -> Vec3 {
     if depth > max_depth {
-        return scene.sample_environment(dir); // Sample environment or default sky
+        return scene.sample_environment(dir);
     }
 
     let intersection = scene.intersect(orig, dir);
 
-    // If we missed, return environment color
     if !intersection.hit {
-        return scene.sample_environment(dir); // Sample environment or default sky
+        return scene.sample_environment(dir);
     }
 
     let point = intersection.point;
     let normal = intersection.normal;
     let material = intersection.material;
 
-    let reflect_dir = reflect(dir, normal).normalized();
+    let reflect_dir = reflect(dir, normal).normalize();
     let reflect_color = if material.albedo[2] > 0.0 && reflection_depth < max_reflection_depth {
-        let color = cast_ray_with_separate_depths(
+        cast_ray_with_separate_depths(
             scene,
             point,
             reflect_dir,
@@ -116,13 +111,12 @@ fn cast_ray_with_separate_depths(
             max_depth,
             max_reflection_depth,
             max_refraction_depth,
-        );
-        color
+        )
     } else {
-        Vector3::ZERO
+        Vec3::ZERO
     };
 
-    let refract_dir = refract(dir, normal, material.refractive_index, 1.0).normalized();
+    let refract_dir = refract(dir, normal, material.refractive_index, 1.0).normalize();
     let refract_color = if material.albedo[3] > 0.0 && refraction_depth < max_refraction_depth {
         cast_ray_with_separate_depths(
             scene,
@@ -136,32 +130,32 @@ fn cast_ray_with_separate_depths(
             max_refraction_depth,
         )
     } else {
-        Vector3::ZERO
+        Vec3::ZERO
     };
 
     let mut diffuse_light_intensity = 0.0;
     let mut specular_light_intensity = 0.0;
 
-    // Calculate lighting from all lights
     for light in &scene.lights {
-        let light_dir = (light.position - point).normalized();
+        let light_dir = (light.position - point).normalize();
 
-        // Check if point is in shadow
+        // Shadow check
         let shadow_intersection = scene.intersect(point, light_dir);
         if shadow_intersection.hit
-            && (shadow_intersection.point - point).norm() < (light.position - point).norm()
+            && (shadow_intersection.point - point).length() < (light.position - point).length()
         {
             continue;
         }
 
-        diffuse_light_intensity += 0.0_f32.max(light_dir.dot(normal));
-        specular_light_intensity += 0.0_f32
-            .max((-reflect(-light_dir, normal)).dot(dir))
+        diffuse_light_intensity += light_dir.dot(normal).max(0.0);
+        specular_light_intensity += (-reflect(-light_dir, normal))
+            .dot(dir)
+            .max(0.0)
             .powf(material.specular_exponent);
     }
 
     material.diffuse_color * diffuse_light_intensity * material.albedo[0]
-        + Vector3::ONE * specular_light_intensity * material.albedo[1]
+        + Vec3::ONE * specular_light_intensity * material.albedo[1]
         + reflect_color * material.albedo[2]
         + refract_color * material.albedo[3]
 }
