@@ -89,7 +89,7 @@ fn sample_sphere(
     }
 }
 
-/// Sample a mesh surface using area-weighted triangle selection
+/// Sample a mesh surface using stratified per-triangle sampling
 fn sample_mesh(
     mesh: &Mesh,
     material: Material,
@@ -101,66 +101,66 @@ fn sample_mesh(
         return;
     }
 
-    // Compute triangle areas and build CDF
-    let mut areas: Vec<f32> = Vec::with_capacity(mesh.indices.len());
-    let mut total_area = 0.0;
-
+    // Sample each triangle with stratified grid
     for tri in &mesh.indices {
         let v0 = mesh.vertices[tri[0] as usize];
         let v1 = mesh.vertices[tri[1] as usize];
         let v2 = mesh.vertices[tri[2] as usize];
 
         let area = (v1 - v0).cross(v2 - v0).length() * 0.5;
-        total_area += area;
-        areas.push(total_area);
-    }
-
-    if total_area < 1e-8 {
-        return;
-    }
-
-    let n_samples = (total_area * density).ceil() as usize;
-
-    for _ in 0..n_samples {
-        // Select triangle by area (CDF sampling)
-        let r = rng.f32() * total_area;
-        let tri_idx = areas.partition_point(|&a| a < r).min(areas.len() - 1);
-
-        let tri = &mesh.indices[tri_idx];
-        let v0 = mesh.vertices[tri[0] as usize];
-        let v1 = mesh.vertices[tri[1] as usize];
-        let v2 = mesh.vertices[tri[2] as usize];
-
-        // Uniform barycentric sampling
-        let mut u = rng.f32();
-        let mut v = rng.f32();
-        if u + v > 1.0 {
-            u = 1.0 - u;
-            v = 1.0 - v;
+        if area < 1e-8 {
+            continue;
         }
-        let w = 1.0 - u - v;
 
-        let pos = v0 * w + v1 * u + v2 * v;
+        // Samples for this triangle
+        let n_samples = (area * density).max(1.0).ceil() as usize;
 
-        // Interpolate normal if available
-        let normal = if mesh.normals.len() == mesh.vertices.len() {
-            let n0 = mesh.normals[tri[0] as usize];
-            let n1 = mesh.normals[tri[1] as usize];
-            let n2 = mesh.normals[tri[2] as usize];
-            (n0 * w + n1 * u + n2 * v).normalize()
+        // Grid resolution (triangular grid in barycentric coords)
+        let grid_res = ((n_samples as f32).sqrt().ceil() as usize).max(1);
+
+        // Get normals
+        let (n0, n1, n2) = if mesh.normals.len() == mesh.vertices.len() {
+            (
+                mesh.normals[tri[0] as usize],
+                mesh.normals[tri[1] as usize],
+                mesh.normals[tri[2] as usize],
+            )
         } else {
-            // Face normal
-            (v1 - v0).cross(v2 - v0).normalize()
+            let face_n = (v1 - v0).cross(v2 - v0).normalize();
+            (face_n, face_n, face_n)
         };
 
-        // Offset slightly along normal
-        let pos = pos + normal * 0.001;
+        // Generate stratified samples in barycentric coordinates
+        let jitter_scale = 0.4 / grid_res as f32;
+        let mut count = 0;
 
-        samples.push(SurfaceSample {
-            pos,
-            normal,
-            material,
-        });
+        for i in 0..grid_res {
+            for j in 0..(grid_res - i) {
+                if count >= n_samples {
+                    break;
+                }
+
+                // Base barycentric coords (center of cell)
+                let u_base = (i as f32 + 0.5) / grid_res as f32;
+                let v_base = (j as f32 + 0.5) / grid_res as f32;
+
+                // Add small jitter to avoid regularity artifacts
+                let u = (u_base + (rng.f32() - 0.5) * jitter_scale).clamp(0.0, 1.0);
+                let v = (v_base + (rng.f32() - 0.5) * jitter_scale).clamp(0.0, 1.0 - u);
+                let w = 1.0 - u - v;
+
+                let pos = v0 * w + v1 * u + v2 * v;
+                let normal = (n0 * w + n1 * u + n2 * v).normalize();
+                let pos = pos + normal * 0.001;
+
+                samples.push(SurfaceSample {
+                    pos,
+                    normal,
+                    material,
+                });
+                count += 1;
+            }
+        }
     }
 }
 
