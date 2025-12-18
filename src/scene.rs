@@ -3,8 +3,8 @@
 use glam::Vec3;
 
 use crate::environment::{DEFAULT_SKY_COLOR, EnvironmentMap};
-use crate::geometry::{Geometry, Hit, Object, Sphere};
-use crate::material::Material;
+use crate::geometry::{Hit, Object, Sphere};
+use crate::material::{checkerboard_material, Material};
 
 /// Light source in the scene
 #[derive(Debug, Clone, Copy)]
@@ -59,13 +59,11 @@ impl Intersection {
 pub struct Scene {
     /// All scene objects (unified geometry + material)
     pub objects: Vec<Object>,
-    /// Legacy sphere storage for compatibility
-    pub spheres: Vec<Sphere>,
     /// Light sources
     pub lights: Vec<Light>,
     /// Environment map
     pub environment: Option<EnvironmentMap>,
-    /// Enable checkerboard plane (legacy)
+    /// Enable checkerboard plane
     pub checkerboard_enabled: bool,
 }
 
@@ -73,7 +71,6 @@ impl Scene {
     pub fn new() -> Self {
         Self {
             objects: Vec::new(),
-            spheres: Vec::new(),
             lights: Vec::new(),
             environment: None,
             checkerboard_enabled: true,
@@ -92,9 +89,9 @@ impl Scene {
         }
     }
 
-    /// Add a sphere (legacy API)
+    /// Add a sphere (converts to unified Object internally)
     pub fn add_sphere(&mut self, sphere: Sphere) {
-        self.spheres.push(sphere);
+        self.objects.push(sphere.to_object());
     }
 
     /// Add an object (new API)
@@ -112,27 +109,12 @@ impl Scene {
         let mut best_t = f32::MAX;
         let mut result = Intersection::empty();
 
-        // Check new objects first
+        // Check all objects
         for object in &self.objects {
             if let Some(hit) = object.geometry.intersect(orig, dir) {
                 if hit.t < best_t {
                     best_t = hit.t;
                     result = Intersection::from_hit(&hit, object.material);
-                }
-            }
-        }
-
-        // Check legacy spheres
-        for sphere in &self.spheres {
-            if let Some(hit) = (Geometry::Sphere {
-                center: sphere.center,
-                radius: sphere.radius,
-            })
-            .intersect(orig, dir)
-            {
-                if hit.t < best_t {
-                    best_t = hit.t;
-                    result = Intersection::from_hit(&hit, sphere.material);
                 }
             }
         }
@@ -177,23 +159,9 @@ impl Scene {
             Vec3::new(0.3, 0.2, 0.1)
         };
 
-        let material = Material {
-            refractive_index: 1.0,
-            albedo: [0.9, 0.1, 0.0, 0.0],
-            diffuse_color: color,
-            specular_exponent: 10.0,
-        };
-
-        Some((t, point, material))
+        Some((t, point, checkerboard_material(color)))
     }
 
-    /// Get all objects for iteration (combines legacy spheres and new objects)
-    pub fn all_objects(&self) -> impl Iterator<Item = Object> + '_ {
-        self.objects
-            .iter()
-            .cloned()
-            .chain(self.spheres.iter().map(|s| s.to_object()))
-    }
 }
 
 impl Default for Scene {

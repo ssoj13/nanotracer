@@ -27,7 +27,7 @@ pub fn refract(i: Vec3, n: Vec3, eta_t: f32, eta_i: f32) -> Vec3 {
     let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
 
     if k < 0.0 {
-        Vec3::new(1.0, 0.0, 0.0) // Total internal reflection
+        reflect(i, n) // Total internal reflection
     } else {
         i * eta + n * (eta * cosi - k.sqrt())
     }
@@ -100,10 +100,16 @@ fn cast_ray_with_separate_depths(
     let material = intersection.material;
 
     let reflect_dir = reflect(dir, normal).normalize();
+    // Offset origin along normal to avoid self-intersection
+    let reflect_orig = if reflect_dir.dot(normal) < 0.0 {
+        point - normal * 1e-3
+    } else {
+        point + normal * 1e-3
+    };
     let reflect_color = if material.albedo[2] > 0.0 && reflection_depth < max_reflection_depth {
         cast_ray_with_separate_depths(
             scene,
-            point,
+            reflect_orig,
             reflect_dir,
             depth + 1,
             reflection_depth + 1,
@@ -117,10 +123,16 @@ fn cast_ray_with_separate_depths(
     };
 
     let refract_dir = refract(dir, normal, material.refractive_index, 1.0).normalize();
+    // Offset origin - inside surface for refraction
+    let refract_orig = if refract_dir.dot(normal) < 0.0 {
+        point - normal * 1e-3
+    } else {
+        point + normal * 1e-3
+    };
     let refract_color = if material.albedo[3] > 0.0 && refraction_depth < max_refraction_depth {
         cast_ray_with_separate_depths(
             scene,
-            point,
+            refract_orig,
             refract_dir,
             depth + 1,
             reflection_depth,
@@ -139,8 +151,13 @@ fn cast_ray_with_separate_depths(
     for light in &scene.lights {
         let light_dir = (light.position - point).normalize();
 
-        // Shadow check
-        let shadow_intersection = scene.intersect(point, light_dir);
+        // Shadow check - offset origin to avoid self-shadowing
+        let shadow_orig = if light_dir.dot(normal) < 0.0 {
+            point - normal * 1e-3
+        } else {
+            point + normal * 1e-3
+        };
+        let shadow_intersection = scene.intersect(shadow_orig, light_dir);
         if shadow_intersection.hit
             && (shadow_intersection.point - point).length() < (light.position - point).length()
         {

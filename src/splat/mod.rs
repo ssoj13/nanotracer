@@ -45,39 +45,16 @@ impl ShCoeffs {
     }
 
     /// Get rest coefficients (degrees 1-3, indices 1-15)
-    /// Returns 45 floats: 15 coeffs * 3 channels, ordered by channel then coefficient
+    /// Returns 45 floats in PLANAR format for bevy_gaussian_splatting:
+    /// f_rest_0..14 = R coeffs, f_rest_15..29 = G coeffs, f_rest_30..44 = B coeffs
     pub fn rest_interleaved(&self) -> Vec<f32> {
         let mut result = Vec::with_capacity(45);
 
-        // 3DGS format: all R coeffs (1-15), then all G, then all B
-        for channel in 0..3 {
-            for coeff_idx in 1..16.min(self.coeffs.len()) {
-                result.push(self.coeffs[coeff_idx][channel]);
-            }
-            // Pad with zeros if degree < 3
-            for _ in self.coeffs.len()..16 {
-                result.push(0.0);
-            }
-        }
-
-        result
-    }
-
-    /// Get normalized rest coefficients for 3DGS format
-    /// Applies scaling to keep values in reasonable range
-    pub fn rest_normalized(&self) -> Vec<f32> {
-        let mut result = Vec::with_capacity(45);
-
-        // No scaling - pass raw SH coefficients
-        // bevy_gaussian_splatting may or may not use them
-        let scale = 1.0; // Raw coefficients
-
-        // 3DGS format: all R coeffs (1-15), then all G, then all B
+        // Planar format: all R coeffs (1-15), then all G, then all B
         for channel in 0..3 {
             for coeff_idx in 1..16 {
                 if coeff_idx < self.coeffs.len() {
-                    // Apply scaling to higher orders
-                    result.push(self.coeffs[coeff_idx][channel] * scale);
+                    result.push(self.coeffs[coeff_idx][channel]);
                 } else {
                     result.push(0.0);
                 }
@@ -86,6 +63,7 @@ impl ShCoeffs {
 
         result
     }
+
 }
 
 /// Single Gaussian splat ready for PLY export

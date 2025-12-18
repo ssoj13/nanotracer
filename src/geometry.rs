@@ -134,14 +134,6 @@ impl Sphere {
     }
 }
 
-/// Legacy ray-sphere intersection for compatibility
-pub fn ray_sphere_intersect(orig: Vec3, dir: Vec3, sphere: &Sphere) -> (bool, f32) {
-    match intersect_sphere(orig, dir, sphere.center, sphere.radius) {
-        Some(hit) => (true, hit.t),
-        None => (false, 0.0),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

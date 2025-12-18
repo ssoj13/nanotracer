@@ -27,9 +27,9 @@ pub const IVORY: Material = Material {
 };
 
 pub const GLASS: Material = Material {
-    refractive_index: 1.1,
+    refractive_index: 1.5,
     albedo: [0.0, 0.9, 0.1, 0.8],
-    diffuse_color: Vec3::new(0.0, 0.0, 0.0),
+    diffuse_color: Vec3::new(0.6, 0.7, 0.8),
     specular_exponent: 125.0,
 };
 
@@ -75,3 +75,13 @@ pub const MATTE_GREEN: Material = Material {
     diffuse_color: Vec3::new(0.2, 0.8, 0.2),
     specular_exponent: 10.0,
 };
+
+/// Create checkerboard material with given diffuse color
+pub fn checkerboard_material(diffuse_color: Vec3) -> Material {
+    Material {
+        refractive_index: 1.0,
+        albedo: [0.9, 0.1, 0.0, 0.0],
+        diffuse_color,
+        specular_exponent: 10.0,
+    }
+}

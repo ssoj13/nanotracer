@@ -261,37 +261,6 @@ pub fn fibonacci_hemisphere(n: usize) -> Vec<Vec3> {
         .collect()
 }
 
-/// Generate stratified random directions on hemisphere
-pub fn stratified_hemisphere(n_theta: usize, n_phi: usize, jitter: bool) -> Vec<Vec3> {
-    let mut dirs = Vec::with_capacity(n_theta * n_phi);
-    let mut rng = fastrand::Rng::new();
-
-    for i in 0..n_theta {
-        for j in 0..n_phi {
-            let u = if jitter {
-                (i as f32 + rng.f32()) / n_theta as f32
-            } else {
-                (i as f32 + 0.5) / n_theta as f32
-            };
-
-            let v = if jitter {
-                (j as f32 + rng.f32()) / n_phi as f32
-            } else {
-                (j as f32 + 0.5) / n_phi as f32
-            };
-
-            // Cosine-weighted hemisphere sampling
-            let theta = 2.0 * PI * v;
-            let r = u.sqrt();
-            let z = (1.0 - u).sqrt();
-
-            dirs.push(Vec3::new(r * theta.cos(), r * theta.sin(), z));
-        }
-    }
-
-    dirs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

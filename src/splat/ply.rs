@@ -129,17 +129,6 @@ fn write_f32(w: &mut impl Write, v: f32) -> Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
-/// Calculate total file size for given number of gaussians
-pub fn estimate_file_size(n_gaussians: usize) -> usize {
-    // Header is approximately 1KB
-    let header_size = 1024;
-
-    // Each gaussian: 3 + 3 + 3 + 45 + 1 + 3 + 4 = 62 floats = 248 bytes
-    let gaussian_size = 62 * 4;
-
-    header_size + n_gaussians * gaussian_size
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

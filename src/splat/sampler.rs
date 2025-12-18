@@ -5,9 +5,9 @@ use rayon::prelude::*;
 use std::f32::consts::PI;
 
 use crate::geometry::{Geometry, Object};
-use crate::material::Material;
+use crate::material::{checkerboard_material, Material};
 use crate::mesh::Mesh;
-use crate::renderer::cast_ray_with_params;
+use crate::renderer::{cast_ray_with_params, reflect, refract};
 use crate::scene::Scene;
 
 use super::sh::{fibonacci_hemisphere, fit_sh};
@@ -33,21 +33,9 @@ pub fn sample_scene(scene: &Scene, config: &SplatConfig) -> Vec<SurfaceSample> {
     let mut samples = Vec::new();
     let mut rng = fastrand::Rng::new();
 
-    // Sample all objects (new system)
+    // Sample all objects
     for object in &scene.objects {
         sample_object(object, config.density, &mut rng, &mut samples);
-    }
-
-    // Sample legacy spheres
-    for sphere in &scene.spheres {
-        sample_sphere(
-            sphere.center,
-            sphere.radius,
-            sphere.material,
-            config.density,
-            &mut rng,
-            &mut samples,
-        );
     }
 
     // Sample checkerboard plane if enabled
@@ -206,17 +194,10 @@ fn sample_checkerboard(density: f32, rng: &mut fastrand::Rng, samples: &mut Vec<
                 Vec3::new(0.3, 0.2, 0.1)
             };
 
-            let material = Material {
-                refractive_index: 1.0,
-                albedo: [0.9, 0.1, 0.0, 0.0],
-                diffuse_color: color,
-                specular_exponent: 10.0,
-            };
-
             samples.push(SurfaceSample {
                 pos: Vec3::new(x, plane_y + 0.001, z),
                 normal: Vec3::Y,
-                material,
+                material: checkerboard_material(color),
             });
         }
     }
@@ -281,8 +262,13 @@ fn trace_incoming(
     for light in &scene.lights {
         let light_dir = (light.position - sample.pos).normalize();
 
-        // Shadow test
-        let shadow_hit = scene.intersect(sample.pos, light_dir);
+        // Shadow test - offset to avoid self-intersection
+        let shadow_orig = if light_dir.dot(sample.normal) < 0.0 {
+            sample.pos - sample.normal * 1e-3
+        } else {
+            sample.pos + sample.normal * 1e-3
+        };
+        let shadow_hit = scene.intersect(shadow_orig, light_dir);
         if shadow_hit.hit
             && (shadow_hit.point - sample.pos).length() < (light.position - sample.pos).length()
         {
@@ -305,9 +291,14 @@ fn trace_incoming(
 
     if material.albedo[2] > 0.0 {
         let reflect_dir = reflect(incoming_dir, sample.normal).normalize();
+        let reflect_orig = if reflect_dir.dot(sample.normal) < 0.0 {
+            sample.pos - sample.normal * 1e-3
+        } else {
+            sample.pos + sample.normal * 1e-3
+        };
         reflect_color = cast_ray_with_params(
             scene,
-            sample.pos,
+            reflect_orig,
             reflect_dir,
             0,
             0,
@@ -320,9 +311,14 @@ fn trace_incoming(
 
     if material.albedo[3] > 0.0 {
         let refract_dir = refract(incoming_dir, sample.normal, material.refractive_index, 1.0);
+        let refract_orig = if refract_dir.dot(sample.normal) < 0.0 {
+            sample.pos - sample.normal * 1e-3
+        } else {
+            sample.pos + sample.normal * 1e-3
+        };
         refract_color = cast_ray_with_params(
             scene,
-            sample.pos,
+            refract_orig,
             refract_dir.normalize(),
             0,
             0,
@@ -362,30 +358,6 @@ fn linear_to_srgb(linear: Vec3) -> Vec3 {
     }
 
     Vec3::new(channel(linear.x), channel(linear.y), channel(linear.z))
-}
-
-/// Reflect direction I about normal N
-fn reflect(i: Vec3, n: Vec3) -> Vec3 {
-    i - n * 2.0 * i.dot(n)
-}
-
-/// Refract direction through surface
-fn refract(i: Vec3, n: Vec3, eta_t: f32, eta_i: f32) -> Vec3 {
-    let cosi = -i.dot(n).clamp(-1.0, 1.0);
-    let (n, eta_i, eta_t, cosi) = if cosi < 0.0 {
-        (-n, eta_t, eta_i, -cosi)
-    } else {
-        (n, eta_i, eta_t, cosi)
-    };
-
-    let eta = eta_i / eta_t;
-    let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
-
-    if k < 0.0 {
-        reflect(i, n)
-    } else {
-        i * eta + n * (eta * cosi - k.sqrt())
-    }
 }
 
 fn opacity_for_material(material: &Material) -> f32 {
