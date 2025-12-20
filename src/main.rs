@@ -200,13 +200,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position: Vec3::new(30.0, 20.0, 30.0),
     });
 
+    // Display rendering statistics
+    if args.splat_output.is_none() { // Only for image rendering mode
+        let tile_size = if args.tile_size == 0 {
+            // Auto-select tile size based on CPU cores
+            let cpu_cores = num_cpus::get();
+            match cpu_cores {
+                0..=2 => 32,
+                3..=4 => 24,
+                5..=8 => 16,
+                9..=16 => 12,
+                _ => 8,  // More than 16 cores
+            }
+        } else {
+            args.tile_size.clamp(1, WIDTH.min(HEIGHT))
+        };
+
+        let tiles_count = if tile_size > 0 {
+            ((WIDTH + tile_size - 1) / tile_size) * ((HEIGHT + tile_size - 1) / tile_size)
+        } else {
+            1  // fallback value
+        };
+
+        println!("┌─────────────────────────────────────────┐");
+        println!("│            RENDERING STATISTICS         │");
+        println!("├─────────────────────────────────────────┤");
+        println!("│ Resolution:      {:>6} x {:<6}        │", WIDTH, HEIGHT);
+        println!("│ Objects:         {:>6}                  │", args.object_count);
+        println!("│ Max depth:       {:>6}                  │", args.max_depth);
+        println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
+        println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
+        println!("│ AA samples:      {:>6}x{:<5}            │", args.aa_samples, args.aa_samples);
+        println!("│ Tile size:       {:>6}                  │", tile_size);
+        println!("│ Tiles count:     {:>6}                  │", tiles_count);
+        println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
+        println!("│ Adaptive AA:     {:>6}                  │", if args.adaptive_aa { "YES" } else { "NO" });
+        println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
+        println!("│ Output file:     {:>6}                  │", "output.png");
+        println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
+        println!("└─────────────────────────────────────────┘");
+    }
+
     // Splat generation mode
     if let Some(splat_path) = &args.splat_output {
-        println!("Generating Gaussian splats...");
-        println!("  Density: {} samples/unit^2", args.splat_density);
-        println!("  SH samples: {}", args.sh_samples);
-        println!("  Tonemap: {}", args.tonemap);
+        // Display splat generation statistics
+        println!("┌─────────────────────────────────────────┐");
+        println!("│         SPLAT GENERATION STATISTICS     │");
+        println!("├─────────────────────────────────────────┤");
+        println!("│ Objects:         {:>6}                  │", args.object_count);
+        println!("│ Max depth:       {:>6}                  │", args.max_depth);
+        println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
+        println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
+        println!("│ Splat density:   {:>6}                  │", args.splat_density);
+        println!("│ SH samples:      {:>6}                  │", args.sh_samples);
+        println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
+        println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
+        println!("│ Output file:     {:>6}                  │", splat_path);
+        println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
+        println!("└─────────────────────────────────────────┘");
 
+        println!("Generating Gaussian splats...");
         let config = SplatConfig {
             density: args.splat_density,
             sh_samples: args.sh_samples,
@@ -269,42 +322,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    // Display rendering statistics
-    println!("┌─────────────────────────────────────────┐");
-    println!("│            RENDERING STATISTICS         │");
-    println!("├─────────────────────────────────────────┤");
-    println!("│ Resolution:      {:>6} x {:<6}        │", WIDTH, HEIGHT);
-    println!("│ Objects:         {:>6}                  │", args.object_count);
-    println!("│ Max depth:       {:>6}                  │", args.max_depth);
-    println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
-    println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
-    println!("│ AA samples:      {:>6}x{:<5}            │", args.aa_samples, args.aa_samples);
-    println!("│ Tile size:       {:>6}                  │", tile_size);
-    println!("│ Tiles count:     {:>6}                  │", tiles.len());
-    println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
-    println!("│ Adaptive AA:     {:>6}                  │", if args.adaptive_aa { "YES" } else { "NO" });
-    println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
-    println!("│ Output file:     {:>6}                  │", "output.png");
-    println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
-    println!("└─────────────────────────────────────────┘");
-
     if args.aa_samples > 1 {
         println!("Rendering scene with {}x anti-aliasing...", args.aa_samples);
     } else {
         println!("Rendering scene...");
     }
-
-    let tiles: Vec<Tile> = (0..HEIGHT)
-        .step_by(tile_size)
-        .flat_map(|y| {
-            (0..WIDTH).step_by(tile_size).map(move |x| Tile {
-                x_start: x,
-                y_start: y,
-                width: tile_size.min(WIDTH - x),
-                height: tile_size.min(HEIGHT - y),
-            })
-        })
-        .collect();
 
     let framebuffer_ptr = Arc::new(FramebufferPtr(framebuffer.as_mut_ptr()));
     let pb = Arc::new({

@@ -1,2 +1,2 @@
 ﻿
-%~dp0%target/release/nanotracer-rs.exe -n 400 --seed 999 -S scene.ply --splat-density 500 --sh-samples 512 --splat-scale 0.03
+%~dp0%target/release/nanotracer-rs.exe -n 120 --seed 123 -S scene_hi.ply --splat-density 512 --sh-samples 36 --splat-scale 0.03
