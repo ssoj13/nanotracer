@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use clap::Parser;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use nanotracer_rs::environment::EnvironmentMap;
-use nanotracer_rs::geometry::{Object, Sphere};
+use nanotracer_rs::geometry::Object;
 use nanotracer_rs::material::{
     GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MIRROR, RED_RUBBER,
 };
-use nanotracer_rs::mesh::{cube, pyramid, torus};
+use nanotracer_rs::mesh::{Mesh, cube, pyramid, torus};
 use nanotracer_rs::renderer::cast_ray_with_params;
 use nanotracer_rs::scene::{Light, Scene};
 use nanotracer_rs::splat::{SplatConfig, ply::write_ply, sampler::generate_splats};
@@ -142,23 +142,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scene.checkerboard_enabled = false;
     }
 
-    // Add default spheres unless disabled
-    if !args.no_spheres {
-        scene.add_sphere(Sphere::new(Vec3::new(-3.0, 0.0, -16.0), 2.0, IVORY));
-        scene.add_sphere(Sphere::new(Vec3::new(-1.0, -1.5, -12.0), 2.0, GLASS));
-        scene.add_sphere(Sphere::new(Vec3::new(1.5, -0.5, -18.0), 3.0, RED_RUBBER));
-        scene.add_sphere(Sphere::new(Vec3::new(7.0, 5.0, -18.0), 4.0, MIRROR));
-        scene.add_sphere(Sphere::new(Vec3::new(-2.0, 1.0, -6.0), 1.5, MIRROR));
-        scene.add_sphere(Sphere::new(Vec3::new(2.5, -1.0, -7.5), 1.2, GLASS));
-        scene.add_sphere(Sphere::new(Vec3::new(0.0, 2.5, -8.0), 1.0, IVORY));
-        scene.add_sphere(Sphere::new(Vec3::new(-4.0, -2.0, -9.0), 1.8, RED_RUBBER));
-        scene.add_sphere(Sphere::new(Vec3::new(3.0, 0.5, -5.5), 1.0, MIRROR));
-    }
-
-    // Add mesh primitives (default: all, or specified type)
+    // Add randomized scene objects
     let mesh_type = args.mesh.as_deref().unwrap_or("all");
-    if mesh_type != "none" {
-        add_meshes(&mut scene, mesh_type);
+    if mesh_type != "none" || !args.no_spheres {
+        add_random_objects(&mut scene, mesh_type, !args.no_spheres, 200);
     }
 
     // Add lights
@@ -262,136 +249,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Add mesh primitives to the scene
-fn add_meshes(scene: &mut Scene, mesh_type: &str) {
-    match mesh_type.to_lowercase().as_str() {
-        "cube" => {
-            println!("Adding cube mesh...");
-            let mesh = cube(2.0);
-            println!("  {} triangles", mesh.tri_count());
-            scene.add_object(Object::mesh(mesh, MATTE_RED));
-        }
-        "pyramid" => {
-            println!("Adding pyramid mesh...");
-            let mesh = pyramid(2.0, 2.5);
-            println!("  {} triangles", mesh.tri_count());
-            let verts: Vec<Vec3> = mesh
-                .vertices
-                .iter()
-                .map(|v| *v + Vec3::new(4.0, -4.0, -12.0))
-                .collect();
-            let shifted = nanotracer_rs::mesh::Mesh::with_normals(
-                verts,
-                mesh.indices.clone(),
-                mesh.normals.clone(),
-            );
-            scene.add_object(Object::mesh(shifted, MATTE_GREEN));
-        }
-        "torus" => {
-            println!("Adding torus mesh...");
-            let mesh = torus(1.5, 0.5, 32, 16);
-            println!("  {} triangles", mesh.tri_count());
-            let verts: Vec<Vec3> = mesh
-                .vertices
-                .iter()
-                .map(|v| {
-                    let rotated = Vec3::new(v.x, v.z, -v.y);
-                    rotated + Vec3::new(-4.0, -2.5, -10.0)
-                })
-                .collect();
-            let shifted = nanotracer_rs::mesh::Mesh::with_normals(
-                verts,
-                mesh.indices.clone(),
-                mesh.normals
-                    .iter()
-                    .map(|n| Vec3::new(n.x, n.z, -n.y))
-                    .collect(),
-            );
-            scene.add_object(Object::mesh(shifted, MATTE_BLUE));
-        }
-        "all" => {
-            println!("Adding 5 random mesh primitives...");
-            let mut rng = fastrand::Rng::new();
+/// Add randomized objects to the scene.
+fn add_random_objects(scene: &mut Scene, mesh_type: &str, include_spheres: bool, count: usize) {
+    #[derive(Clone, Copy)]
+    enum MeshKind {
+        Cube,
+        Pyramid,
+        Torus,
+    }
 
-            let materials = [MATTE_RED, MATTE_GREEN, MATTE_BLUE, IVORY, RED_RUBBER];
+    #[derive(Clone, Copy)]
+    enum ObjectKind {
+        Sphere,
+        Mesh(MeshKind),
+    }
 
-            for i in 0..5 {
-                // Random position in view
-                let x = rng.f32() * 12.0 - 6.0; // -6 to 6
-                let y = rng.f32() * 4.0 - 4.0; // -4 to 0 (on/above floor)
-                let z = -8.0 - rng.f32() * 10.0; // -8 to -18
-                let pos = Vec3::new(x, y, z);
-
-                // Random size (doubled)
-                let size = 1.6 + rng.f32() * 2.4; // 1.6 to 4.0
-
-                // Random material
-                let mat = materials[rng.usize(0..materials.len())];
-
-                // Random primitive type
-                let prim_type = rng.u32(0..3);
-
-                let mesh = match prim_type {
-                    0 => {
-                        // Cube
-                        let m = cube(size);
-                        let verts: Vec<Vec3> = m.vertices.iter().map(|v| *v + pos).collect();
-                        nanotracer_rs::mesh::Mesh::with_normals(
-                            verts,
-                            m.indices.clone(),
-                            m.normals.clone(),
-                        )
-                    }
-                    1 => {
-                        // Pyramid
-                        let m = pyramid(size, size * 1.3);
-                        let verts: Vec<Vec3> = m.vertices.iter().map(|v| *v + pos).collect();
-                        nanotracer_rs::mesh::Mesh::with_normals(
-                            verts,
-                            m.indices.clone(),
-                            m.normals.clone(),
-                        )
-                    }
-                    _ => {
-                        // Torus (tilted randomly)
-                        let m = torus(size * 0.6, size * 0.2, 24, 12);
-                        let angle = rng.f32() * std::f32::consts::PI;
-                        let cos_a = angle.cos();
-                        let sin_a = angle.sin();
-                        let verts: Vec<Vec3> = m
-                            .vertices
-                            .iter()
-                            .map(|v| {
-                                let rotated = Vec3::new(
-                                    v.x,
-                                    v.y * cos_a - v.z * sin_a,
-                                    v.y * sin_a + v.z * cos_a,
-                                );
-                                rotated + pos
-                            })
-                            .collect();
-                        let normals: Vec<Vec3> = m
-                            .normals
-                            .iter()
-                            .map(|n| {
-                                Vec3::new(n.x, n.y * cos_a - n.z * sin_a, n.y * sin_a + n.z * cos_a)
-                                    .normalize()
-                            })
-                            .collect();
-                        nanotracer_rs::mesh::Mesh::with_normals(verts, m.indices.clone(), normals)
-                    }
-                };
-
-                println!(
-                    "  Mesh {}: {} tris at ({:.1}, {:.1}, {:.1})",
-                    i + 1,
-                    mesh.tri_count(),
-                    pos.x,
-                    pos.y,
-                    pos.z
-                );
-                scene.add_object(Object::mesh(mesh, mat));
+    fn random_unit_vec(rng: &mut fastrand::Rng) -> Vec3 {
+        loop {
+            let x = rng.f32() * 2.0 - 1.0;
+            let y = rng.f32() * 2.0 - 1.0;
+            let z = rng.f32() * 2.0 - 1.0;
+            let v = Vec3::new(x, y, z);
+            let len = v.length();
+            if len > 1e-6 && len <= 1.0 {
+                return v / len;
             }
+        }
+    }
+
+    fn transform_mesh(base: &Mesh, scale: f32, rotation: Quat, translation: Vec3) -> Mesh {
+        let vertices: Vec<Vec3> = base
+            .vertices
+            .iter()
+            .map(|v| translation + rotation * (*v * scale))
+            .collect();
+
+        let normals: Vec<Vec3> = if base.normals.len() == base.vertices.len() {
+            base.normals
+                .iter()
+                .map(|n| (rotation * *n).normalize())
+                .collect()
+        } else {
+            base.normals.clone()
+        };
+
+        Mesh::with_normals(vertices, base.indices.clone(), normals)
+    }
+
+    let mut mesh_kinds = Vec::new();
+    match mesh_type.to_lowercase().as_str() {
+        "cube" => mesh_kinds.push(MeshKind::Cube),
+        "pyramid" => mesh_kinds.push(MeshKind::Pyramid),
+        "torus" => mesh_kinds.push(MeshKind::Torus),
+        "all" => {
+            mesh_kinds.push(MeshKind::Cube);
+            mesh_kinds.push(MeshKind::Pyramid);
+            mesh_kinds.push(MeshKind::Torus);
         }
         "none" => {}
         _ => {
@@ -399,6 +312,81 @@ fn add_meshes(scene: &mut Scene, mesh_type: &str) {
                 "Unknown mesh type: {}. Use: cube, pyramid, torus, all, none",
                 mesh_type
             );
+        }
+    }
+
+    let mut kinds = Vec::new();
+    if include_spheres {
+        kinds.push(ObjectKind::Sphere);
+    }
+    for kind in &mesh_kinds {
+        kinds.push(ObjectKind::Mesh(*kind));
+    }
+
+    if kinds.is_empty() {
+        return;
+    }
+
+    let base_cube = cube(1.0);
+    let base_pyramid = pyramid(1.0, 1.25);
+    let base_torus = torus(1.0, 0.35, 24, 12);
+
+    let materials = [
+        MATTE_RED,
+        MATTE_GREEN,
+        MATTE_BLUE,
+        IVORY,
+        RED_RUBBER,
+        GLASS,
+        MIRROR,
+    ];
+
+    let mut rng = fastrand::Rng::new();
+    let per_kind = count / kinds.len();
+    let mut pool = Vec::with_capacity(count);
+
+    for kind in &kinds {
+        for _ in 0..per_kind {
+            pool.push(*kind);
+        }
+    }
+    while pool.len() < count {
+        pool.push(kinds[rng.usize(0..kinds.len())]);
+    }
+
+    for i in (1..pool.len()).rev() {
+        let j = rng.usize(0..=i);
+        pool.swap(i, j);
+    }
+
+    for kind in pool {
+        let pos = Vec3::new(
+            rng.f32() * 24.0 - 12.0,
+            rng.f32() * 8.0 - 4.0,
+            -6.0 - rng.f32() * 28.0,
+        );
+
+        let mat = materials[rng.usize(0..materials.len())];
+
+        match kind {
+            ObjectKind::Sphere => {
+                let radius = 0.4 + rng.f32() * 2.4;
+                scene.add_object(Object::sphere(pos, radius, mat));
+            }
+            ObjectKind::Mesh(mesh_kind) => {
+                let scale = 0.6 + rng.f32() * 2.6;
+                let axis = random_unit_vec(&mut rng);
+                let angle = rng.f32() * std::f32::consts::TAU;
+                let rotation = Quat::from_axis_angle(axis, angle);
+
+                let mesh = match mesh_kind {
+                    MeshKind::Cube => transform_mesh(&base_cube, scale, rotation, pos),
+                    MeshKind::Pyramid => transform_mesh(&base_pyramid, scale, rotation, pos),
+                    MeshKind::Torus => transform_mesh(&base_torus, scale, rotation, pos),
+                };
+
+                scene.add_object(Object::mesh(mesh, mat));
+            }
         }
     }
 }
