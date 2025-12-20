@@ -10,3 +10,5 @@ image = "0.24"
 clap = { version = "4.0", features = ["derive"] }
 exr = "1.7"
 fastrand = "2.0"
+rtbvh = "0.6.2"
+indicatif = "0.17"

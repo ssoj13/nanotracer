@@ -1,9 +1,12 @@
-//! Mesh geometry with BVH acceleration
+//! Mesh geometry with light-weight BVH acceleration using `rtbvh`.
 //!
-//! Supports triangle meshes with per-vertex normals and BVH for fast ray intersection.
+//! Supports triangle meshes with per-vertex normals, precomputed primitives, and
+//! fast BVH traversal for ray intersections.
 
 use glam::Vec3;
+use rtbvh::{Aabb, Builder, Bvh, Primitive, Ray};
 use std::f32::consts::PI;
+use std::num::NonZeroUsize;
 
 /// Triangle mesh with BVH acceleration
 #[derive(Debug, Clone)]
@@ -11,79 +14,41 @@ pub struct Mesh {
     pub vertices: Vec<Vec3>,
     pub indices: Vec<[u32; 3]>,
     pub normals: Vec<Vec3>, // per-vertex normals
-    bvh: Option<MeshBvh>,
+    bvh: Option<Bvh>,
+    primitives: Vec<TrianglePrimitive>,
 }
 
-/// Simple BVH node for mesh triangles
-#[derive(Debug, Clone)]
-struct BvhNode {
+/// Triangle primitive wired into `rtbvh`
+#[derive(Debug, Copy, Clone)]
+struct TrianglePrimitive {
+    tri_index: u32,
+    center: Vec3,
     aabb: Aabb,
-    /// If leaf: triangle indices, else empty
-    triangles: Vec<u32>,
-    /// Child node indices (0 = invalid)
-    left: usize,
-    right: usize,
 }
 
-/// Axis-aligned bounding box
-#[derive(Debug, Clone, Copy)]
-pub struct Aabb {
-    pub min: Vec3,
-    pub max: Vec3,
-}
-
-impl Aabb {
-    pub fn empty() -> Self {
+impl TrianglePrimitive {
+    fn new(tri_index: u32, vertices: &[Vec3], tri: [u32; 3]) -> Self {
+        let v0 = vertices[tri[0] as usize];
+        let v1 = vertices[tri[1] as usize];
+        let v2 = vertices[tri[2] as usize];
+        let center = (v0 + v1 + v2) * (1.0 / 3.0);
+        let aabb = Aabb::from_points(&[v0, v1, v2]);
         Self {
-            min: Vec3::splat(f32::INFINITY),
-            max: Vec3::splat(f32::NEG_INFINITY),
+            tri_index,
+            center,
+            aabb,
         }
     }
-
-    pub fn from_point(p: Vec3) -> Self {
-        Self { min: p, max: p }
-    }
-
-    pub fn expand(&mut self, p: Vec3) {
-        self.min = self.min.min(p);
-        self.max = self.max.max(p);
-    }
-
-    pub fn merge(&self, other: &Aabb) -> Self {
-        Self {
-            min: self.min.min(other.min),
-            max: self.max.max(other.max),
-        }
-    }
-
-    pub fn center(&self) -> Vec3 {
-        (self.min + self.max) * 0.5
-    }
-
-    pub fn surface_area(&self) -> f32 {
-        let d = self.max - self.min;
-        2.0 * (d.x * d.y + d.y * d.z + d.z * d.x)
-    }
-
-    /// Ray-AABB intersection (slab method)
-    pub fn intersect_ray(&self, origin: Vec3, dir_inv: Vec3, t_max: f32) -> bool {
-        let t1 = (self.min - origin) * dir_inv;
-        let t2 = (self.max - origin) * dir_inv;
-
-        let t_min_v = t1.min(t2);
-        let t_max_v = t1.max(t2);
-
-        let t_enter = t_min_v.x.max(t_min_v.y).max(t_min_v.z).max(0.001);
-        let t_exit = t_max_v.x.min(t_max_v.y).min(t_max_v.z).min(t_max);
-
-        t_enter <= t_exit
-    }
 }
 
-/// BVH for mesh triangles
-#[derive(Debug, Clone)]
-struct MeshBvh {
-    nodes: Vec<BvhNode>,
+impl Primitive<i32> for TrianglePrimitive {
+    fn center(&self) -> Vec3 {
+        self.center
+    }
+
+    fn aabb(&self) -> Aabb<i32> {
+        self.aabb
+    }
 }
 
 /// Result of ray-triangle intersection
@@ -104,6 +69,7 @@ impl Mesh {
             indices,
             normals,
             bvh: None,
+            primitives: Vec::new(),
         };
         mesh.build_bvh();
         mesh
@@ -116,6 +82,7 @@ impl Mesh {
             indices,
             normals,
             bvh: None,
+            primitives: Vec::new(),
         };
         mesh.build_bvh();
         mesh
@@ -145,170 +112,52 @@ impl Mesh {
     /// Build BVH for fast intersection
     fn build_bvh(&mut self) {
         if self.indices.is_empty() {
+            self.primitives.clear();
+            self.bvh = None;
             return;
         }
 
-        let tri_count = self.indices.len();
-        let mut tri_indices: Vec<u32> = (0..tri_count as u32).collect();
-        let mut tri_aabbs: Vec<Aabb> = self
+        let primitives: Vec<TrianglePrimitive> = self
             .indices
             .iter()
-            .map(|tri| self.triangle_aabb(tri))
+            .enumerate()
+            .map(|(i, tri)| TrianglePrimitive::new(i as u32, &self.vertices, *tri))
             .collect();
-        let mut tri_centers: Vec<Vec3> = tri_aabbs.iter().map(|aabb| aabb.center()).collect();
 
-        let mut nodes = Vec::with_capacity(tri_count * 2);
-
-        Self::build_bvh_recursive(
-            &mut nodes,
-            &mut tri_indices,
-            &mut tri_aabbs,
-            &mut tri_centers,
-            0,
-            tri_count,
-        );
-
-        self.bvh = Some(MeshBvh { nodes });
-    }
-
-    fn triangle_aabb(&self, tri: &[u32; 3]) -> Aabb {
-        let v0 = self.vertices[tri[0] as usize];
-        let v1 = self.vertices[tri[1] as usize];
-        let v2 = self.vertices[tri[2] as usize];
-        Aabb {
-            min: v0.min(v1).min(v2),
-            max: v0.max(v1).max(v2),
-        }
-    }
-
-    fn build_bvh_recursive(
-        nodes: &mut Vec<BvhNode>,
-        tri_indices: &mut [u32],
-        tri_aabbs: &mut [Aabb],
-        tri_centers: &mut [Vec3],
-        start: usize,
-        end: usize,
-    ) -> usize {
-        let count = end - start;
-
-        // Compute bounds
-        let mut bounds = Aabb::empty();
-        for i in start..end {
-            bounds = bounds.merge(&tri_aabbs[i]);
-        }
-
-        // Leaf node if few triangles
-        if count <= 4 {
-            let node_idx = nodes.len();
-            nodes.push(BvhNode {
-                aabb: bounds,
-                triangles: tri_indices[start..end].to_vec(),
-                left: 0,
-                right: 0,
-            });
-            return node_idx;
-        }
-
-        // Find best split axis (longest)
-        let extent = bounds.max - bounds.min;
-        let axis = if extent.x > extent.y && extent.x > extent.z {
-            0
-        } else if extent.y > extent.z {
-            1
-        } else {
-            2
+        let builder = Builder {
+            aabbs: None,
+            primitives: primitives.as_slice(),
+            primitives_per_leaf: NonZeroUsize::new(4),
         };
 
-        // Sort by center along axis
-        let slice = &mut tri_indices[start..end];
-        let aabb_slice = &mut tri_aabbs[start..end];
-        let center_slice = &mut tri_centers[start..end];
-
-        // Simple sorting by center coordinate
-        for i in 0..slice.len() {
-            for j in i + 1..slice.len() {
-                let ci = match axis {
-                    0 => center_slice[i].x,
-                    1 => center_slice[i].y,
-                    _ => center_slice[i].z,
-                };
-                let cj = match axis {
-                    0 => center_slice[j].x,
-                    1 => center_slice[j].y,
-                    _ => center_slice[j].z,
-                };
-                if cj < ci {
-                    slice.swap(i, j);
-                    aabb_slice.swap(i, j);
-                    center_slice.swap(i, j);
-                }
-            }
-        }
-
-        let mid = start + count / 2;
-
-        // Reserve node index
-        let node_idx = nodes.len();
-        nodes.push(BvhNode {
-            aabb: bounds,
-            triangles: vec![],
-            left: 0,
-            right: 0,
-        });
-
-        // Build children
-        let left =
-            Self::build_bvh_recursive(nodes, tri_indices, tri_aabbs, tri_centers, start, mid);
-        let right = Self::build_bvh_recursive(nodes, tri_indices, tri_aabbs, tri_centers, mid, end);
-
-        nodes[node_idx].left = left;
-        nodes[node_idx].right = right;
-
-        node_idx
+        let bvh = builder.construct_binned_sah().ok();
+        self.primitives = primitives;
+        self.bvh = bvh;
     }
 
     /// Ray-mesh intersection using BVH
     pub fn intersect(&self, origin: Vec3, dir: Vec3) -> Option<TriangleHit> {
         let bvh = self.bvh.as_ref()?;
-        if bvh.nodes.is_empty() {
+        if self.primitives.is_empty() {
             return None;
         }
 
-        let dir_inv = Vec3::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
-        let mut best: Option<TriangleHit> = None;
-        let mut t_max = f32::INFINITY;
+        let mut ray = Ray::from((origin, dir));
+        let mut best_hit: Option<TriangleHit> = None;
+        let mut best_t = f32::INFINITY;
 
-        let mut stack = vec![0usize];
-
-        while let Some(node_idx) = stack.pop() {
-            let node = &bvh.nodes[node_idx];
-
-            if !node.aabb.intersect_ray(origin, dir_inv, t_max) {
-                continue;
-            }
-
-            // Leaf node
-            if !node.triangles.is_empty() {
-                for &tri_idx in &node.triangles {
-                    if let Some(hit) = self.intersect_triangle(origin, dir, tri_idx) {
-                        if hit.t < t_max && hit.t > 0.001 {
-                            t_max = hit.t;
-                            best = Some(hit);
-                        }
-                    }
-                }
-            } else {
-                // Internal node
-                if node.left != 0 {
-                    stack.push(node.left);
-                }
-                if node.right != 0 {
-                    stack.push(node.right);
+        let mut iter = bvh.traverse_iter(&mut ray, self.primitives.as_slice());
+        while let Some((prim, bvh_ray)) = iter.next() {
+            if let Some(hit) = self.intersect_triangle(origin, dir, prim.tri_index) {
+                if hit.t < best_t {
+                    best_t = hit.t;
+                    best_hit = Some(hit);
+                    bvh_ray.t = best_t;
                 }
             }
         }
 
-        best
+        best_hit
     }
 
     /// Moller-Trumbore ray-triangle intersection
@@ -362,6 +211,18 @@ impl Mesh {
 
         let w = 1.0 - hit.u - hit.v;
         (n0 * w + n1 * hit.u + n2 * hit.v).normalize()
+    }
+
+    /// Axis-aligned bounding box of the mesh
+    pub fn bounding_box(&self) -> Aabb {
+        if self.vertices.is_empty() {
+            return Aabb::empty();
+        }
+        let mut bounds = Aabb::empty();
+        for &vertex in &self.vertices {
+            bounds.grow(vertex);
+        }
+        bounds
     }
 
     /// Total surface area

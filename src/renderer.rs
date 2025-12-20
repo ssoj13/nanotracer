@@ -1,7 +1,9 @@
 //! Ray casting and rendering logic
 
+use fastrand;
 use glam::Vec3;
 
+use crate::material::Material;
 use crate::scene::Scene;
 
 /// Maximum recursion depth for ray tracing
@@ -29,7 +31,7 @@ pub fn refract(i: Vec3, n: Vec3, eta_t: f32, eta_i: f32) -> Vec3 {
     if k < 0.0 {
         reflect(i, n) // Total internal reflection
     } else {
-        i * eta + n * (eta * cosi - k.sqrt())
+        (i * eta + n * (eta * cosi - k.sqrt())).normalize_or_zero()
     }
 }
 
@@ -99,56 +101,69 @@ fn cast_ray_with_separate_depths(
     let normal = intersection.normal;
     let material = intersection.material;
 
-    let reflect_dir = reflect(dir, normal).normalize();
-    // Offset origin along normal to avoid self-intersection
-    let reflect_orig = if reflect_dir.dot(normal) < 0.0 {
-        point - normal * 1e-3
-    } else {
-        point + normal * 1e-3
-    };
-    let reflect_color = if material.albedo[2] > 0.0 && reflection_depth < max_reflection_depth {
-        cast_ray_with_separate_depths(
-            scene,
-            reflect_orig,
-            reflect_dir,
-            depth + 1,
-            reflection_depth + 1,
-            refraction_depth,
-            max_depth,
-            max_reflection_depth,
-            max_refraction_depth,
-        )
-    } else {
-        Vec3::ZERO
+    let rr_weight = match russian_roulette(depth, &material) {
+        Some(weight) => weight,
+        None => return Vec3::ZERO,
     };
 
-    let refract_dir = refract(dir, normal, material.refractive_index, 1.0).normalize();
-    // Offset origin - inside surface for refraction
-    let refract_orig = if refract_dir.dot(normal) < 0.0 {
-        point - normal * 1e-3
-    } else {
-        point + normal * 1e-3
-    };
-    let refract_color = if material.albedo[3] > 0.0 && refraction_depth < max_refraction_depth {
-        cast_ray_with_separate_depths(
-            scene,
-            refract_orig,
-            refract_dir,
-            depth + 1,
-            reflection_depth,
-            refraction_depth + 1,
-            max_depth,
-            max_reflection_depth,
-            max_refraction_depth,
-        )
-    } else {
-        Vec3::ZERO
-    };
+    let use_fast_diffuse =
+        material.albedo[1] <= 0.0 && material.albedo[2] <= 0.0 && material.albedo[3] <= 0.0;
+
+    let mut reflect_color = Vec3::ZERO;
+    let mut refract_color = Vec3::ZERO;
+
+    if !use_fast_diffuse {
+        let reflect_dir = reflect(dir, normal);
+        // Offset origin along normal to avoid self-intersection
+        let reflect_orig = if reflect_dir.dot(normal) < 0.0 {
+            point - normal * 1e-3
+        } else {
+            point + normal * 1e-3
+        };
+        if material.albedo[2] > 0.0 && reflection_depth < max_reflection_depth {
+            reflect_color = cast_ray_with_separate_depths(
+                scene,
+                reflect_orig,
+                reflect_dir,
+                depth + 1,
+                reflection_depth + 1,
+                refraction_depth,
+                max_depth,
+                max_reflection_depth,
+                max_refraction_depth,
+            );
+        }
+
+        let refract_dir = refract(dir, normal, material.refractive_index, 1.0);
+        // Offset origin - inside surface for refraction
+        let refract_orig = if refract_dir.dot(normal) < 0.0 {
+            point - normal * 1e-3
+        } else {
+            point + normal * 1e-3
+        };
+        if material.albedo[3] > 0.0 && refraction_depth < max_refraction_depth {
+            refract_color = cast_ray_with_separate_depths(
+                scene,
+                refract_orig,
+                refract_dir,
+                depth + 1,
+                reflection_depth,
+                refraction_depth + 1,
+                max_depth,
+                max_reflection_depth,
+                max_refraction_depth,
+            );
+        }
+    }
 
     let mut diffuse_light_intensity = 0.0;
     let mut specular_light_intensity = 0.0;
 
-    for light in &scene.lights {
+    let light_count = scene.lights.len();
+    if light_count > 0 {
+        let light_weight = light_count as f32;
+        let light_idx = fastrand::usize(..light_count);
+        let light = &scene.lights[light_idx];
         let light_dir = (light.position - point).normalize();
 
         // Shadow check - offset origin to avoid self-shadowing
@@ -161,18 +176,44 @@ fn cast_ray_with_separate_depths(
         if shadow_intersection.hit
             && (shadow_intersection.point - point).length() < (light.position - point).length()
         {
-            continue;
+            diffuse_light_intensity = 0.0;
+            specular_light_intensity = 0.0;
+        } else {
+            diffuse_light_intensity = light_dir.dot(normal).max(0.0) * light_weight;
+            if !use_fast_diffuse {
+                specular_light_intensity = (-reflect(-light_dir, normal))
+                    .dot(dir)
+                    .max(0.0)
+                    .powf(material.specular_exponent)
+                    * light_weight;
+            }
         }
-
-        diffuse_light_intensity += light_dir.dot(normal).max(0.0);
-        specular_light_intensity += (-reflect(-light_dir, normal))
-            .dot(dir)
-            .max(0.0)
-            .powf(material.specular_exponent);
     }
 
-    material.diffuse_color * diffuse_light_intensity * material.albedo[0]
+    let color = material.diffuse_color * diffuse_light_intensity * material.albedo[0]
         + Vec3::ONE * specular_light_intensity * material.albedo[1]
         + reflect_color * material.albedo[2]
-        + refract_color * material.albedo[3]
+        + refract_color * material.albedo[3];
+
+    color * rr_weight
+}
+
+fn russian_roulette(depth: i32, material: &Material) -> Option<f32> {
+    if depth <= 4 {
+        return Some(1.0);
+    }
+
+    let energy =
+        material.albedo.iter().copied().sum::<f32>() + material.diffuse_color.max_element();
+    let survival = energy.clamp(0.05, 1.0);
+
+    if survival >= 1.0 {
+        return Some(1.0);
+    }
+
+    if fastrand::f32() < survival {
+        Some(1.0 / survival)
+    } else {
+        None
+    }
 }

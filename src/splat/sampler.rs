@@ -292,7 +292,7 @@ fn trace_incoming(
     let mut refract_color = Vec3::ZERO;
 
     if material.albedo[2] > 0.0 {
-        let reflect_dir = reflect(incoming_dir, sample.normal).normalize();
+        let reflect_dir = reflect(incoming_dir, sample.normal);
         let reflect_orig = if reflect_dir.dot(sample.normal) < 0.0 {
             sample.pos - sample.normal * 1e-3
         } else {
@@ -321,7 +321,7 @@ fn trace_incoming(
         refract_color = cast_ray_with_params(
             scene,
             refract_orig,
-            refract_dir.normalize(),
+            refract_dir,
             0,
             0,
             0,

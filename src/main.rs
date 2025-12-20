@@ -1,7 +1,10 @@
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use glam::{Quat, Vec3};
+use indicatif::{ProgressBar, ProgressStyle};
 use nanotracer_rs::environment::EnvironmentMap;
 use nanotracer_rs::geometry::Object;
 use nanotracer_rs::material::{
@@ -21,28 +24,33 @@ use rayon::prelude::*;
   Rendering:
     nanotracer-rs                           # Basic render, output.png
     nanotracer-rs -a 4                       # 4x anti-aliasing
-    nanotracer-rs -a 8 -s                    # 8x AA + procedural sky
-    nanotracer-rs -n hdr.exr -e 0.5          # HDR environment, exposure 0.5
+    nanotracer-rs -a 8 --sky                 # 8x AA + procedural sky
+    nanotracer-rs -e hdr.exr -x 0.5          # HDR environment, exposure 0.5
     nanotracer-rs -a 4 -m 64 -r 8 -f 20      # High quality: more bounces
 
+  Controlling scene:
+    nanotracer-rs -n 400 --seed 1234         # reproducible object set
+
   With meshes:
-    nanotracer-rs --mesh cube               # Add a cube mesh
-    nanotracer-rs --mesh torus              # Add a torus mesh
-    nanotracer-rs --mesh all                # Add all mesh primitives
+    nanotracer-rs --mesh cube                # Add a cube mesh
+    nanotracer-rs --mesh torus               # Add a torus mesh
+    nanotracer-rs --mesh all                 # Add all mesh primitives
 
-  Gaussian Splats (fast preview):
-    nanotracer-rs -S test.ply --splat-density 50 --sh-samples 16
-
-  Gaussian Splats (balanced):
+  Gaussian Splats:
     nanotracer-rs -S scene.ply --splat-density 200 --sh-samples 64
-
-  Gaussian Splats (high quality):
-    nanotracer-rs -S hq.ply --splat-density 500 --sh-samples 128
 
   Disable tonemapping (linear colors):
     nanotracer-rs --tonemap false
 "#)]
 struct Args {
+    /// Number of objects to generate for the scene
+    #[arg(short = 'n', long = "num", default_value_t = 200)]
+    object_count: usize,
+
+    /// Random seed for scene generation (optional)
+    #[arg(short = 's', long = "seed")]
+    scene_seed: Option<u64>,
+
     /// Maximum recursion depth
     #[arg(short = 'm', long = "max", default_value_t = 32)]
     max_depth: i32,
@@ -55,21 +63,29 @@ struct Args {
     #[arg(short = 'f', long = "refr", default_value_t = 16)]
     refraction_depth: i32,
 
-    /// HDR environment map file (.exr format)
-    #[arg(short = 'n', long = "env")]
-    env_path: Option<String>,
-
-    /// Use procedural sky gradient instead of solid background
-    #[arg(short = 's', long = "sky")]
-    use_sky: bool,
-
-    /// Exposure adjustment for HDR environment maps
-    #[arg(short = 'e', long = "exp", default_value_t = 0.1)]
-    exposure: f32,
-
     /// Anti-aliasing samples per pixel
     #[arg(short = 'a', long = "aa", default_value_t = 1)]
     aa_samples: u32,
+
+    /// HDR environment map file (.exr format)
+    #[arg(short = 'e', long = "env")]
+    env_path: Option<String>,
+
+    /// Exposure adjustment for HDR environment maps
+    #[arg(short = 'x', long = "exposure", default_value_t = 0.1)]
+    exposure: f32,
+
+    /// Use procedural sky gradient instead of solid background
+    #[arg(long = "sky")]
+    use_sky: bool,
+
+    /// Tile size for parallel render batches
+    #[arg(long = "tilesize", default_value_t = 16)]
+    tile_size: usize,
+
+    /// Apply tonemapping (Reinhard) before writing colors
+    #[arg(short = 't', long = "tonemap", default_value_t = true)]
+    tonemap: bool,
 
     /// Export Gaussian splats to PLY file (skips image rendering)
     #[arg(short = 'S', long = "splats")]
@@ -78,10 +94,6 @@ struct Args {
     /// SH sampling directions per splat (default: 64)
     #[arg(long = "sh-samples", default_value_t = 64)]
     sh_samples: usize,
-
-    /// Apply tonemapping (Reinhard) before writing colors
-    #[arg(short = 't', long = "tonemap", default_value_t = true)]
-    tonemap: bool,
 
     /// Surface samples per unit area (default: 100)
     #[arg(long = "splat-density", default_value_t = 100.0)]
@@ -104,6 +116,19 @@ struct Args {
     no_spheres: bool,
 }
 
+#[derive(Debug)]
+struct Tile {
+    x_start: usize,
+    y_start: usize,
+    width: usize,
+    height: usize,
+}
+
+struct FramebufferPtr(*mut Vec3);
+
+unsafe impl Sync for FramebufferPtr {}
+unsafe impl Send for FramebufferPtr {}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     const WIDTH: usize = 1024;
@@ -111,6 +136,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const FOV: f32 = 1.05;
 
     let mut scene = Scene::new();
+    let scene_seed = args
+        .scene_seed
+        .unwrap_or_else(|| fastrand::u64(..=u64::MAX));
+    println!("Scene RNG seed: {}", scene_seed);
 
     // Environment setup
     if let Some(env_path) = &args.env_path {
@@ -145,8 +174,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Add randomized scene objects
     let mesh_type = args.mesh.as_deref().unwrap_or("all");
     if mesh_type != "none" || !args.no_spheres {
-        add_random_objects(&mut scene, mesh_type, !args.no_spheres, 200);
+        add_random_objects(
+            &mut scene,
+            mesh_type,
+            !args.no_spheres,
+            args.object_count,
+            Some(scene_seed),
+        );
     }
+
+    scene.rebuild_scene_bvh();
 
     // Add lights
     scene.add_light(Light {
@@ -200,41 +237,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Rendering scene...");
     }
 
-    framebuffer
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, pixel)| {
-            let x = i % WIDTH;
-            let y = i / WIDTH;
+    let aa_samples = args.aa_samples;
+    let samples_per_pixel = (aa_samples * aa_samples) as f32;
+    let inv_spp = 1.0 / samples_per_pixel;
+    let half_width = WIDTH as f32 * 0.5;
+    let half_height = HEIGHT as f32 * 0.5;
+    let fov_scale = (FOV / 2.0).tan();
+    let dir_z = -(HEIGHT as f32) / (2.0 * fov_scale);
 
-            let mut color = Vec3::ZERO;
+    let tile_size = args.tile_size.clamp(1, WIDTH.min(HEIGHT));
+    let tiles: Vec<Tile> = (0..HEIGHT)
+        .step_by(tile_size)
+        .flat_map(|y| {
+            (0..WIDTH).step_by(tile_size).map(move |x| Tile {
+                x_start: x,
+                y_start: y,
+                width: tile_size.min(WIDTH - x),
+                height: tile_size.min(HEIGHT - y),
+            })
+        })
+        .collect();
 
-            for sample_y in 0..args.aa_samples {
-                for sample_x in 0..args.aa_samples {
-                    let jitter_x = (sample_x as f32 + 0.5) / args.aa_samples as f32;
-                    let jitter_y = (sample_y as f32 + 0.5) / args.aa_samples as f32;
+    let framebuffer_ptr = Arc::new(FramebufferPtr(framebuffer.as_mut_ptr()));
+    let pb = Arc::new({
+        let pb = ProgressBar::new(tiles.len() as u64);
+        let style =
+            ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} tiles ({eta})")
+                .unwrap()
+                .progress_chars("=>-");
+        pb.set_style(style);
+        pb.set_message("Rendering");
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    });
+    tiles.par_iter().for_each(|tile| {
+        let framebuffer_ptr = framebuffer_ptr.clone();
+        let pb = pb.clone();
+        for y in tile.y_start..(tile.y_start + tile.height) {
+            let row_offset = y * WIDTH;
+            for x in tile.x_start..(tile.x_start + tile.width) {
+                let mut color = Vec3::ZERO;
 
-                    let dir_x = (x as f32 + jitter_x) - WIDTH as f32 / 2.0;
-                    let dir_y = -(y as f32 + jitter_y) + HEIGHT as f32 / 2.0;
-                    let dir_z = -(HEIGHT as f32) / (2.0 * (FOV / 2.0).tan());
+                for sample_y in 0..aa_samples {
+                    for sample_x in 0..aa_samples {
+                        let jitter_x = (sample_x as f32 + 0.5) / aa_samples as f32;
+                        let jitter_y = (sample_y as f32 + 0.5) / aa_samples as f32;
 
-                    let direction = Vec3::new(dir_x, dir_y, dir_z).normalize();
-                    color += cast_ray_with_params(
-                        &scene,
-                        Vec3::ZERO,
-                        direction,
-                        0,
-                        0,
-                        0,
-                        args.max_depth,
-                        args.reflection_depth,
-                        args.refraction_depth,
-                    );
+                        let dir_x = (x as f32 + jitter_x) - half_width;
+                        let dir_y = -(y as f32 + jitter_y) + half_height;
+                        let direction = Vec3::new(dir_x, dir_y, dir_z).normalize();
+                        color += cast_ray_with_params(
+                            &scene,
+                            Vec3::ZERO,
+                            direction,
+                            0,
+                            0,
+                            0,
+                            args.max_depth,
+                            args.reflection_depth,
+                            args.refraction_depth,
+                        );
+                    }
+                }
+
+                let final_color = color * inv_spp;
+                let idx = row_offset + x;
+                unsafe {
+                    *framebuffer_ptr.0.add(idx) = final_color;
                 }
             }
+        }
+        pb.inc(1);
+    });
 
-            *pixel = color / (args.aa_samples * args.aa_samples) as f32;
-        });
+    pb.finish_with_message("Rendering complete");
 
     println!("Saving image...");
     save_image(
@@ -250,7 +326,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Add randomized objects to the scene.
-fn add_random_objects(scene: &mut Scene, mesh_type: &str, include_spheres: bool, count: usize) {
+fn add_random_objects(
+    scene: &mut Scene,
+    mesh_type: &str,
+    include_spheres: bool,
+    count: usize,
+    seed: Option<u64>,
+) {
     #[derive(Clone, Copy)]
     enum MeshKind {
         Cube,
@@ -341,7 +423,10 @@ fn add_random_objects(scene: &mut Scene, mesh_type: &str, include_spheres: bool,
         MIRROR,
     ];
 
-    let mut rng = fastrand::Rng::new();
+    let mut rng = match seed {
+        Some(value) => fastrand::Rng::with_seed(value),
+        None => fastrand::Rng::new(),
+    };
     let per_kind = count / kinds.len();
     let mut pool = Vec::with_capacity(count);
 
