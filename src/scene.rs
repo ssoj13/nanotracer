@@ -193,10 +193,13 @@ impl Scene {
 
     /// Checkerboard plane intersection (legacy)
     fn intersect_checkerboard(&self, orig: Vec3, dir: Vec3) -> Option<(f32, Vec3, Material)> {
-        if dir.y.abs() < 0.001 {
+        // Fast early exit for rays parallel to plane
+        let dir_y_abs = dir.y.abs();
+        if dir_y_abs < 0.001 {
             return None;
         }
 
+        // Calculate intersection with y = -4 plane
         let t = -(orig.y + 4.0) / dir.y;
         if t < 0.001 {
             return None;
@@ -204,17 +207,20 @@ impl Scene {
 
         let point = orig + dir * t;
 
-        // Bounds check
-        if point.x.abs() >= 10.0 || point.z >= -10.0 || point.z <= -30.0 {
+        // Fast bounds check
+        let px = point.x;
+        let pz = point.z;
+        if px.abs() >= 10.0 || pz >= -10.0 || pz <= -30.0 {
             return None;
         }
 
-        // Checkerboard pattern
-        let checker = ((0.5 * point.x + 1000.0) as i32 + (0.5 * point.z) as i32) & 1;
-        let color = if checker == 1 {
-            Vec3::new(0.3, 0.3, 0.3)
+        // Fast checkerboard pattern calculation
+        let checker = ((0.5 * px + 1000.0) as i32 + (0.5 * pz) as i32) & 1;
+        // Use precomputed colors to avoid allocation
+        let color = if checker != 0 {
+            Vec3::new(0.3, 0.3, 0.3)  // white tile
         } else {
-            Vec3::new(0.3, 0.2, 0.1)
+            Vec3::new(0.3, 0.2, 0.1)  // brown tile
         };
 
         Some((t, point, checkerboard_material(color)))

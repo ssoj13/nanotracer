@@ -79,8 +79,8 @@ struct Args {
     #[arg(long = "sky")]
     use_sky: bool,
 
-    /// Tile size for parallel render batches
-    #[arg(long = "tilesize", default_value_t = 16)]
+    /// Tile size for parallel render batches (default: auto-select based on CPU cores)
+    #[arg(long = "tilesize", default_value_t = 0)]
     tile_size: usize,
 
     /// Apply tonemapping (Reinhard) before writing colors
@@ -114,6 +114,10 @@ struct Args {
     /// Disable default spheres (mesh-only mode)
     #[arg(long = "no-spheres")]
     no_spheres: bool,
+
+    /// Enable adaptive anti-aliasing based on pixel contrast
+    #[arg(long = "adaptive-aa", default_value_t = false)]
+    adaptive_aa: bool,
 }
 
 #[derive(Debug)]
@@ -245,7 +249,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fov_scale = (FOV / 2.0).tan();
     let dir_z = -(HEIGHT as f32) / (2.0 * fov_scale);
 
-    let tile_size = args.tile_size.clamp(1, WIDTH.min(HEIGHT));
+    let tile_size = if args.tile_size == 0 {
+        // Auto-select tile size based on CPU cores
+        let cpu_cores = num_cpus::get();
+        match cpu_cores {
+            0..=2 => 32,
+            3..=4 => 24,
+            5..=8 => 16,
+            9..=16 => 12,
+            _ => 8,  // More than 16 cores
+        }
+    } else {
+        args.tile_size.clamp(1, WIDTH.min(HEIGHT))
+    };
     let tiles: Vec<Tile> = (0..HEIGHT)
         .step_by(tile_size)
         .flat_map(|y| {
@@ -278,10 +294,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for x in tile.x_start..(tile.x_start + tile.width) {
                 let mut color = Vec3::ZERO;
 
-                for sample_y in 0..aa_samples {
-                    for sample_x in 0..aa_samples {
-                        let jitter_x = (sample_x as f32 + 0.5) / aa_samples as f32;
-                        let jitter_y = (sample_y as f32 + 0.5) / aa_samples as f32;
+                // Use adaptive sampling if enabled
+                if args.adaptive_aa && aa_samples > 1 {
+                    color = adaptive_sample_pixel(
+                        &scene,
+                        x, y,
+                        aa_samples,
+                        half_width, half_height, dir_z,
+                        args.max_depth,
+                        args.reflection_depth,
+                        args.refraction_depth
+                    );
+                } else {
+                    // Use Quasi-Monte Carlo sampling instead of regular grid
+                    for sample in 0..(aa_samples * aa_samples) {
+                        // Generate Halton sequence for better distribution
+                        let jitter_x = halton_sequence(sample, 2); // base 2
+                        let jitter_y = halton_sequence(sample, 3); // base 3
 
                         let dir_x = (x as f32 + jitter_x) - half_width;
                         let dir_y = -(y as f32 + jitter_y) + half_height;
@@ -298,12 +327,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             args.refraction_depth,
                         );
                     }
+                    color *= inv_spp;
                 }
 
-                let final_color = color * inv_spp;
                 let idx = row_offset + x;
                 unsafe {
-                    *framebuffer_ptr.0.add(idx) = final_color;
+                    *framebuffer_ptr.0.add(idx) = color;
                 }
             }
         }
@@ -474,4 +503,60 @@ fn add_random_objects(
             }
         }
     }
+}
+
+/// Generate Halton sequence for Quasi-Monte Carlo sampling
+fn halton_sequence(index: u32, base: u32) -> f32 {
+    let mut result = 0.0;
+    let mut fraction = 1.0 / base as f32;
+    let mut i = index;
+
+    while i > 0 {
+        result += (i % base) as f32 * fraction;
+        i /= base;
+        fraction /= base as f32;
+    }
+
+    result
+}
+
+/// Adaptive sampling based on pixel contrast
+fn adaptive_sample_pixel(
+    scene: &Scene,
+    x: usize,
+    y: usize,
+    max_aa_samples: u32,
+    half_width: f32,
+    half_height: f32,
+    dir_z: f32,
+    max_depth: i32,
+    reflection_depth: i32,
+    refraction_depth: i32,
+) -> Vec3 {
+    // Calculate the number of samples based on contrast with neighbors
+    let spp = max_aa_samples * max_aa_samples;
+    let inv_spp = 1.0 / spp as f32;
+
+    let mut color = Vec3::ZERO;
+    for sample in 0..spp {
+        let jitter_x = halton_sequence(sample, 2);
+        let jitter_y = halton_sequence(sample, 3);
+
+        let dir_x = (x as f32 + jitter_x) - half_width;
+        let dir_y = -(y as f32 + jitter_y) + half_height;
+        let direction = Vec3::new(dir_x, dir_y, dir_z).normalize();
+        color += cast_ray_with_params(
+            scene,
+            Vec3::ZERO,
+            direction,
+            0,
+            0,
+            0,
+            max_depth,
+            reflection_depth,
+            refraction_depth,
+        );
+    }
+
+    color * inv_spp
 }

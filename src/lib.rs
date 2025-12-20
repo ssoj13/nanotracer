@@ -5,6 +5,7 @@ pub mod material;
 pub mod mesh;
 pub mod renderer;
 pub mod scene;
+pub mod simd_renderer;
 pub mod splat;
 pub mod utils;
 pub mod vec3;

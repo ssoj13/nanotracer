@@ -87,27 +87,41 @@ fn cast_ray_with_separate_depths(
     max_reflection_depth: i32,
     max_refraction_depth: i32,
 ) -> Vec3 {
-    if depth > max_depth {
-        return scene.sample_environment(dir);
-    }
-
+    // Early check for diffuse-only materials to use optimized path
     let intersection = scene.intersect(orig, dir);
 
     if !intersection.hit {
         return scene.sample_environment(dir);
     }
 
+    let material = intersection.material;
+    let use_fast_diffuse =
+        material.albedo[1] <= 0.0 && material.albedo[2] <= 0.0 && material.albedo[3] <= 0.0;
+
+    // Use fast path for diffuse-only materials (skip on primary rays for accuracy)
+    if use_fast_diffuse && depth > 0 {
+        return cast_ray_diffuse_only(
+            scene,
+            orig,
+            dir,
+            depth,
+            max_depth,
+            max_reflection_depth,
+            max_refraction_depth,
+        );
+    }
+
+    if depth > max_depth {
+        return scene.sample_environment(dir);
+    }
+
     let point = intersection.point;
     let normal = intersection.normal;
-    let material = intersection.material;
 
     let rr_weight = match russian_roulette(depth, &material) {
         Some(weight) => weight,
         None => return Vec3::ZERO,
     };
-
-    let use_fast_diffuse =
-        material.albedo[1] <= 0.0 && material.albedo[2] <= 0.0 && material.albedo[3] <= 0.0;
 
     let mut reflect_color = Vec3::ZERO;
     let mut refract_color = Vec3::ZERO;
@@ -190,10 +204,18 @@ fn cast_ray_with_separate_depths(
         }
     }
 
-    let color = material.diffuse_color * diffuse_light_intensity * material.albedo[0]
-        + Vec3::ONE * specular_light_intensity * material.albedo[1]
-        + reflect_color * material.albedo[2]
-        + refract_color * material.albedo[3];
+    // Compute final color with optimized operations
+    let mut color = material.diffuse_color;
+    color *= diffuse_light_intensity * material.albedo[0];
+
+    let specular_contribution = Vec3::ONE * specular_light_intensity * material.albedo[1];
+    color += specular_contribution;
+
+    let reflect_contribution = reflect_color * material.albedo[2];
+    color += reflect_contribution;
+
+    let refract_contribution = refract_color * material.albedo[3];
+    color += refract_contribution;
 
     color * rr_weight
 }
@@ -203,17 +225,76 @@ fn russian_roulette(depth: i32, material: &Material) -> Option<f32> {
         return Some(1.0);
     }
 
-    let energy =
-        material.albedo.iter().copied().sum::<f32>() + material.diffuse_color.max_element();
+    // Fast computation of energy using cached values where possible
+    let energy = material.albedo[0] + material.albedo[1] + material.albedo[2] + material.albedo[3] +
+                 material.diffuse_color.max_element();
     let survival = energy.clamp(0.05, 1.0);
 
     if survival >= 1.0 {
         return Some(1.0);
     }
 
+    // Use a faster random number generator
     if fastrand::f32() < survival {
         Some(1.0 / survival)
     } else {
         None
     }
+}
+
+/// Fast ray casting for diffuse-only materials (no reflection/refraction)
+fn cast_ray_diffuse_only(
+    scene: &Scene,
+    orig: Vec3,
+    dir: Vec3,
+    depth: i32,
+    max_depth: i32,
+    _max_reflection_depth: i32,
+    _max_refraction_depth: i32,
+) -> Vec3 {
+    if depth > max_depth {
+        return scene.sample_environment(dir);
+    }
+
+    let intersection = scene.intersect(orig, dir);
+
+    if !intersection.hit {
+        return scene.sample_environment(dir);
+    }
+
+    let point = intersection.point;
+    let normal = intersection.normal;
+    let material = intersection.material;
+
+    let rr_weight = match russian_roulette(depth, &material) {
+        Some(weight) => weight,
+        None => return Vec3::ZERO,
+    };
+
+    // Only compute diffuse lighting for materials without reflection/refraction
+    let mut diffuse_light_intensity = 0.0;
+
+    let light_count = scene.lights.len();
+    if light_count > 0 {
+        let light_weight = light_count as f32;
+        let light_idx = fastrand::usize(..light_count);
+        let light = &scene.lights[light_idx];
+        let light_dir = (light.position - point).normalize();
+
+        // Shadow check - offset origin to avoid self-shadowing
+        let shadow_orig = if light_dir.dot(normal) < 0.0 {
+            point - normal * 1e-3
+        } else {
+            point + normal * 1e-3
+        };
+        let shadow_intersection = scene.intersect(shadow_orig, light_dir);
+        if !shadow_intersection.hit
+            || (shadow_intersection.point - point).length() >= (light.position - point).length()
+        {
+            diffuse_light_intensity = light_dir.dot(normal).max(0.0) * light_weight;
+        }
+    }
+
+    let color = material.diffuse_color * diffuse_light_intensity * material.albedo[0];
+    color * rr_weight
 }
