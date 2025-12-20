@@ -4,7 +4,9 @@ use clap::Parser;
 use glam::Vec3;
 use nanotracer_rs::environment::EnvironmentMap;
 use nanotracer_rs::geometry::{Object, Sphere};
-use nanotracer_rs::material::{GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MIRROR, RED_RUBBER};
+use nanotracer_rs::material::{
+    GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MIRROR, RED_RUBBER,
+};
 use nanotracer_rs::mesh::{cube, pyramid, torus};
 use nanotracer_rs::renderer::cast_ray_with_params;
 use nanotracer_rs::scene::{Light, Scene};
@@ -36,6 +38,9 @@ use rayon::prelude::*;
 
   Gaussian Splats (high quality):
     nanotracer-rs -S hq.ply --splat-density 500 --sh-samples 128
+
+  Disable tonemapping (linear colors):
+    nanotracer-rs --tonemap false
 "#)]
 struct Args {
     /// Maximum recursion depth
@@ -74,13 +79,13 @@ struct Args {
     #[arg(long = "sh-samples", default_value_t = 64)]
     sh_samples: usize,
 
+    /// Apply tonemapping (Reinhard) before writing colors
+    #[arg(short = 't', long = "tonemap", default_value_t = true)]
+    tonemap: bool,
+
     /// Surface samples per unit area (default: 100)
     #[arg(long = "splat-density", default_value_t = 100.0)]
     splat_density: f32,
-
-    /// Maximum SH degree 0-3 (default: 3)
-    #[arg(long = "sh-degree", default_value_t = 3)]
-    sh_degree: u32,
 
     /// Override splat scale (radius). Auto-calculated from density if not set
     #[arg(long = "splat-scale")]
@@ -172,16 +177,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Generating Gaussian splats...");
         println!("  Density: {} samples/unit^2", args.splat_density);
         println!("  SH samples: {}", args.sh_samples);
-        println!("  SH degree: {}", args.sh_degree);
+        println!("  Tonemap: {}", args.tonemap);
 
         let config = SplatConfig {
             density: args.splat_density,
             sh_samples: args.sh_samples,
-            sh_degree: args.sh_degree.min(3),
             max_depth: args.max_depth,
             reflection_depth: args.reflection_depth,
             refraction_depth: args.refraction_depth,
             scale_override: args.splat_scale,
+            tonemap: args.tonemap,
         };
 
         let gaussians = generate_splats(&scene, &config);
@@ -245,7 +250,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
     println!("Saving image...");
-    save_image(&framebuffer, WIDTH as u32, HEIGHT as u32, "output.png")?;
+    save_image(
+        &framebuffer,
+        WIDTH as u32,
+        HEIGHT as u32,
+        "output.png",
+        args.tonemap,
+    )?;
 
     println!("Render complete! Image saved as output.png");
     Ok(())
@@ -264,55 +275,82 @@ fn add_meshes(scene: &mut Scene, mesh_type: &str) {
             println!("Adding pyramid mesh...");
             let mesh = pyramid(2.0, 2.5);
             println!("  {} triangles", mesh.tri_count());
-            let verts: Vec<Vec3> = mesh.vertices.iter().map(|v| *v + Vec3::new(4.0, -4.0, -12.0)).collect();
-            let shifted = nanotracer_rs::mesh::Mesh::with_normals(verts, mesh.indices.clone(), mesh.normals.clone());
+            let verts: Vec<Vec3> = mesh
+                .vertices
+                .iter()
+                .map(|v| *v + Vec3::new(4.0, -4.0, -12.0))
+                .collect();
+            let shifted = nanotracer_rs::mesh::Mesh::with_normals(
+                verts,
+                mesh.indices.clone(),
+                mesh.normals.clone(),
+            );
             scene.add_object(Object::mesh(shifted, MATTE_GREEN));
         }
         "torus" => {
             println!("Adding torus mesh...");
             let mesh = torus(1.5, 0.5, 32, 16);
             println!("  {} triangles", mesh.tri_count());
-            let verts: Vec<Vec3> = mesh.vertices.iter().map(|v| {
-                let rotated = Vec3::new(v.x, v.z, -v.y);
-                rotated + Vec3::new(-4.0, -2.5, -10.0)
-            }).collect();
-            let shifted = nanotracer_rs::mesh::Mesh::with_normals(verts, mesh.indices.clone(), mesh.normals.iter().map(|n| Vec3::new(n.x, n.z, -n.y)).collect());
+            let verts: Vec<Vec3> = mesh
+                .vertices
+                .iter()
+                .map(|v| {
+                    let rotated = Vec3::new(v.x, v.z, -v.y);
+                    rotated + Vec3::new(-4.0, -2.5, -10.0)
+                })
+                .collect();
+            let shifted = nanotracer_rs::mesh::Mesh::with_normals(
+                verts,
+                mesh.indices.clone(),
+                mesh.normals
+                    .iter()
+                    .map(|n| Vec3::new(n.x, n.z, -n.y))
+                    .collect(),
+            );
             scene.add_object(Object::mesh(shifted, MATTE_BLUE));
         }
         "all" => {
             println!("Adding 5 random mesh primitives...");
             let mut rng = fastrand::Rng::new();
-            
+
             let materials = [MATTE_RED, MATTE_GREEN, MATTE_BLUE, IVORY, RED_RUBBER];
-            
+
             for i in 0..5 {
                 // Random position in view
-                let x = rng.f32() * 12.0 - 6.0;  // -6 to 6
-                let y = rng.f32() * 4.0 - 4.0;   // -4 to 0 (on/above floor)
+                let x = rng.f32() * 12.0 - 6.0; // -6 to 6
+                let y = rng.f32() * 4.0 - 4.0; // -4 to 0 (on/above floor)
                 let z = -8.0 - rng.f32() * 10.0; // -8 to -18
                 let pos = Vec3::new(x, y, z);
-                
+
                 // Random size (doubled)
                 let size = 1.6 + rng.f32() * 2.4; // 1.6 to 4.0
-                
+
                 // Random material
                 let mat = materials[rng.usize(0..materials.len())];
-                
+
                 // Random primitive type
                 let prim_type = rng.u32(0..3);
-                
+
                 let mesh = match prim_type {
                     0 => {
                         // Cube
                         let m = cube(size);
                         let verts: Vec<Vec3> = m.vertices.iter().map(|v| *v + pos).collect();
-                        nanotracer_rs::mesh::Mesh::with_normals(verts, m.indices.clone(), m.normals.clone())
+                        nanotracer_rs::mesh::Mesh::with_normals(
+                            verts,
+                            m.indices.clone(),
+                            m.normals.clone(),
+                        )
                     }
                     1 => {
                         // Pyramid
                         let m = pyramid(size, size * 1.3);
                         let verts: Vec<Vec3> = m.vertices.iter().map(|v| *v + pos).collect();
-                        nanotracer_rs::mesh::Mesh::with_normals(verts, m.indices.clone(), m.normals.clone())
+                        nanotracer_rs::mesh::Mesh::with_normals(
+                            verts,
+                            m.indices.clone(),
+                            m.normals.clone(),
+                        )
                     }
                     _ => {
                         // Torus (tilted randomly)
@@ -320,25 +358,47 @@ fn add_meshes(scene: &mut Scene, mesh_type: &str) {
                         let angle = rng.f32() * std::f32::consts::PI;
                         let cos_a = angle.cos();
                         let sin_a = angle.sin();
-                        let verts: Vec<Vec3> = m.vertices.iter().map(|v| {
-                            let rotated = Vec3::new(v.x, v.y * cos_a - v.z * sin_a, v.y * sin_a + v.z * cos_a);
-                            rotated + pos
-                        }).collect();
-                        let normals: Vec<Vec3> = m.normals.iter().map(|n| {
-                            Vec3::new(n.x, n.y * cos_a - n.z * sin_a, n.y * sin_a + n.z * cos_a).normalize()
-                        }).collect();
+                        let verts: Vec<Vec3> = m
+                            .vertices
+                            .iter()
+                            .map(|v| {
+                                let rotated = Vec3::new(
+                                    v.x,
+                                    v.y * cos_a - v.z * sin_a,
+                                    v.y * sin_a + v.z * cos_a,
+                                );
+                                rotated + pos
+                            })
+                            .collect();
+                        let normals: Vec<Vec3> = m
+                            .normals
+                            .iter()
+                            .map(|n| {
+                                Vec3::new(n.x, n.y * cos_a - n.z * sin_a, n.y * sin_a + n.z * cos_a)
+                                    .normalize()
+                            })
+                            .collect();
                         nanotracer_rs::mesh::Mesh::with_normals(verts, m.indices.clone(), normals)
                     }
                 };
-                
-                println!("  Mesh {}: {} tris at ({:.1}, {:.1}, {:.1})", 
-                    i + 1, mesh.tri_count(), pos.x, pos.y, pos.z);
+
+                println!(
+                    "  Mesh {}: {} tris at ({:.1}, {:.1}, {:.1})",
+                    i + 1,
+                    mesh.tri_count(),
+                    pos.x,
+                    pos.y,
+                    pos.z
+                );
                 scene.add_object(Object::mesh(mesh, mat));
             }
         }
         "none" => {}
         _ => {
-            eprintln!("Unknown mesh type: {}. Use: cube, pyramid, torus, all, none", mesh_type);
+            eprintln!(
+                "Unknown mesh type: {}. Use: cube, pyramid, torus, all, none",
+                mesh_type
+            );
         }
     }
 }

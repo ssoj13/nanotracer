@@ -55,20 +55,16 @@ impl Geometry {
     /// Ray intersection, returns hit info if intersection found
     pub fn intersect(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
         match self {
-            Geometry::Sphere { center, radius } => {
-                intersect_sphere(origin, dir, *center, *radius)
-            }
-            Geometry::Mesh(mesh) => {
-                mesh.intersect(origin, dir).map(|tri_hit| {
-                    let point = origin + dir * tri_hit.t;
-                    let normal = mesh.normal_at(&tri_hit);
-                    Hit {
-                        t: tri_hit.t,
-                        point,
-                        normal,
-                    }
-                })
-            }
+            Geometry::Sphere { center, radius } => intersect_sphere(origin, dir, *center, *radius),
+            Geometry::Mesh(mesh) => mesh.intersect(origin, dir).map(|tri_hit| {
+                let point = origin + dir * tri_hit.t;
+                let normal = mesh.normal_at(&tri_hit);
+                Hit {
+                    t: tri_hit.t,
+                    point,
+                    normal,
+                }
+            }),
         }
     }
 

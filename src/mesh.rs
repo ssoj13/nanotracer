@@ -259,8 +259,7 @@ impl Mesh {
         // Build children
         let left =
             Self::build_bvh_recursive(nodes, tri_indices, tri_aabbs, tri_centers, start, mid);
-        let right =
-            Self::build_bvh_recursive(nodes, tri_indices, tri_aabbs, tri_centers, mid, end);
+        let right = Self::build_bvh_recursive(nodes, tri_indices, tri_aabbs, tri_centers, mid, end);
 
         nodes[node_idx].left = left;
         nodes[node_idx].right = right;
@@ -485,7 +484,12 @@ pub fn pyramid(base: f32, height: f32) -> Mesh {
 }
 
 /// Create a torus with smooth normals
-pub fn torus(major_radius: f32, minor_radius: f32, major_segments: u32, minor_segments: u32) -> Mesh {
+pub fn torus(
+    major_radius: f32,
+    minor_radius: f32,
+    major_segments: u32,
+    minor_segments: u32,
+) -> Mesh {
     let mut vertices = Vec::new();
     let mut normals = Vec::new();
     let mut indices = Vec::new();

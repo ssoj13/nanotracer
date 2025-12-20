@@ -4,13 +4,14 @@ use glam::Vec3;
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
+use crate::color::apply_tonemap_srgb;
 use crate::geometry::{Geometry, Object};
-use crate::material::{checkerboard_material, Material};
+use crate::material::{Material, checkerboard_material};
 use crate::mesh::Mesh;
 use crate::renderer::{cast_ray_with_params, reflect, refract};
 use crate::scene::Scene;
 
-use super::sh::{fibonacci_hemisphere, fit_sh};
+use super::sh::fibonacci_hemisphere;
 use super::{Gaussian, SplatConfig, SurfaceSample};
 
 /// Fibonacci sphere direction sampling
@@ -224,26 +225,27 @@ fn local_to_world(local: Vec3, tangent: Vec3, bitangent: Vec3, normal: Vec3) -> 
 }
 
 /// Sample incoming radiance at a surface point for SH fitting
-fn sample_sh_radiance(
-    scene: &Scene,
-    sample: &SurfaceSample,
-    config: &SplatConfig,
-) -> Vec<(Vec3, Vec3)> {
+fn average_radiance(scene: &Scene, sample: &SurfaceSample, config: &SplatConfig) -> Vec3 {
     let local_dirs = fibonacci_hemisphere(config.sh_samples);
     let (tangent, bitangent, normal) = tangent_frame(sample.normal);
 
-    let mut radiance_samples = Vec::with_capacity(config.sh_samples);
+    let mut sum = Vec3::ZERO;
+    let mut count = 0usize;
 
     for local_dir in local_dirs {
         let world_outgoing = local_to_world(local_dir, tangent, bitangent, normal);
-        let view_dir = -world_outgoing.normalize();
 
         let radiance = trace_incoming(scene, sample, world_outgoing, config);
 
-        radiance_samples.push((view_dir, radiance));
+        sum += radiance;
+        count += 1;
     }
 
-    radiance_samples
+    if count > 0 {
+        sum / count as f32
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Trace incoming radiance at surface point from given direction
@@ -329,43 +331,11 @@ fn trace_incoming(
         );
     }
 
-    tonemap_srgb(
-        diffuse
-            + specular
-            + reflect_color * material.albedo[2]
-            + refract_color * material.albedo[3],
-    )
-}
-
-fn tonemap_srgb(color_linear: Vec3) -> Vec3 {
-    let mapped = tonemap_reinhard(color_linear);
-    linear_to_srgb(mapped)
-}
-
-fn tonemap_reinhard(color: Vec3) -> Vec3 {
-    let c = color.max(Vec3::ZERO);
-    c / (Vec3::ONE + c)
-}
-
-fn linear_to_srgb(linear: Vec3) -> Vec3 {
-    fn channel(v: f32) -> f32 {
-        let v = v.clamp(0.0, 1.0);
-        if v <= 0.003_130_8 {
-            12.92 * v
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        }
-    }
-
-    Vec3::new(channel(linear.x), channel(linear.y), channel(linear.z))
+    diffuse + specular + reflect_color * material.albedo[2] + refract_color * material.albedo[3]
 }
 
 fn opacity_for_material(material: &Material) -> f32 {
-    if material.albedo[3] > 0.0 {
-        0.15
-    } else {
-        0.98
-    }
+    if material.albedo[3] > 0.0 { 0.15 } else { 0.98 }
 }
 
 /// Estimate splat scale from sampling density
@@ -391,8 +361,8 @@ pub fn generate_splats(scene: &Scene, config: &SplatConfig) -> Vec<Gaussian> {
     );
 
     println!(
-        "Fitting SH coefficients ({} samples per splat, degree {})...",
-        config.sh_samples, config.sh_degree
+        "Sampling view-independent color ({} samples per splat)...",
+        config.sh_samples
     );
 
     let gaussians: Vec<Gaussian> = samples
@@ -405,10 +375,10 @@ pub fn generate_splats(scene: &Scene, config: &SplatConfig) -> Vec<Gaussian> {
 
             let opacity = opacity_for_material(&sample.material);
 
-            let radiance_samples = sample_sh_radiance(scene, sample, config);
-            let sh = fit_sh(&radiance_samples, config.sh_degree);
+            let radiance = average_radiance(scene, sample, config);
+            let color_srgb = apply_tonemap_srgb(radiance, config.tonemap);
 
-            Gaussian::from_sample(sample, &sh, splat_scale, opacity)
+            Gaussian::from_sample_constant(sample, color_srgb, splat_scale, opacity)
         })
         .collect();
 

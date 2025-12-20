@@ -12,7 +12,7 @@ use super::ShCoeffs;
 // 3DGS implementation (graphdeco-inria/gaussian-splatting, utils/sh_utils.py).
 // Many viewers expect this exact convention; mixing SH conventions yields
 // psychedelic/incorrect colors.
-const SH_C0: f32 = 0.28209479177387814;
+pub const SH_C0: f32 = 0.28209479177387814;
 const SH_C1: f32 = 0.4886025119029199;
 const SH_C2: [f32; 5] = [
     1.0925484305920792,
@@ -84,6 +84,12 @@ pub fn sh_basis_all(max_degree: u32, dir: Vec3) -> Vec<f32> {
     }
 
     result
+}
+
+/// Convert sRGB color in [0,1] to a DC coefficient in 3DGS feature space.
+pub fn sh_dc_from_srgb(color: Vec3) -> [f32; 3] {
+    let c = color.clamp(Vec3::ZERO, Vec3::ONE) - Vec3::splat(0.5);
+    [c.x / SH_C0, c.y / SH_C0, c.z / SH_C0]
 }
 
 /// Fit SH coefficients to radiance samples using least squares

@@ -10,6 +10,7 @@ pub mod sh;
 use glam::Vec3;
 
 use crate::material::Material;
+use crate::splat::sh::sh_dc_from_srgb;
 
 /// Surface sample from geometry
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +64,6 @@ impl ShCoeffs {
 
         result
     }
-
 }
 
 /// Single Gaussian splat ready for PLY export
@@ -121,6 +121,36 @@ impl Gaussian {
             rotation,
         }
     }
+
+    /// Create gaussian from a constant sRGB color (view-independent).
+    pub fn from_sample_constant(
+        sample: &SurfaceSample,
+        color_srgb: Vec3,
+        splat_scale: f32,
+        opacity_prob: f32,
+    ) -> Self {
+        let sh_dc = sh_dc_from_srgb(color_srgb);
+        let sh_rest = vec![0.0; 45];
+
+        let rotation = quat_from_normal(sample.normal);
+
+        let tangent_sigma = splat_scale.max(1e-6);
+        let normal_sigma = (splat_scale * 0.3).max(1e-6);
+        let scale = [tangent_sigma.ln(), tangent_sigma.ln(), normal_sigma.ln()];
+
+        let opacity_p = opacity_prob.clamp(1e-4, 1.0 - 1e-4);
+        let opacity = logit(opacity_p);
+
+        Self {
+            pos: sample.pos,
+            normal: sample.normal,
+            sh_dc,
+            sh_rest,
+            opacity,
+            scale,
+            rotation,
+        }
+    }
 }
 
 /// Compute quaternion that rotates Z-axis to given normal
@@ -162,8 +192,6 @@ pub struct SplatConfig {
     pub density: f32,
     /// Number of directions to sample for SH fitting
     pub sh_samples: usize,
-    /// Maximum SH degree (0-3)
-    pub sh_degree: u32,
     /// Maximum ray depth for SH sampling
     pub max_depth: i32,
     /// Reflection depth limit
@@ -172,6 +200,8 @@ pub struct SplatConfig {
     pub refraction_depth: i32,
     /// Override splat scale (if None, auto-calculated from density)
     pub scale_override: Option<f32>,
+    /// Apply tonemap before writing SH/DC
+    pub tonemap: bool,
 }
 
 impl Default for SplatConfig {
@@ -179,11 +209,11 @@ impl Default for SplatConfig {
         Self {
             density: 100.0,
             sh_samples: 64,
-            sh_degree: 3,
             max_depth: 32,
             reflection_depth: 6,
             refraction_depth: 16,
             scale_override: None,
+            tonemap: true,
         }
     }
 }

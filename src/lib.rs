@@ -1,3 +1,4 @@
+pub mod color;
 pub mod environment;
 pub mod geometry;
 pub mod material;

@@ -4,7 +4,7 @@ use glam::Vec3;
 
 use crate::environment::{DEFAULT_SKY_COLOR, EnvironmentMap};
 use crate::geometry::{Hit, Object, Sphere};
-use crate::material::{checkerboard_material, Material};
+use crate::material::{Material, checkerboard_material};
 
 /// Light source in the scene
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +161,6 @@ impl Scene {
 
         Some((t, point, checkerboard_material(color)))
     }
-
 }
 
 impl Default for Scene {
