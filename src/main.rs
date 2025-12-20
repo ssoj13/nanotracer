@@ -235,12 +235,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Render mode
     let mut framebuffer = vec![Vec3::ZERO; WIDTH * HEIGHT];
 
-    if args.aa_samples > 1 {
-        println!("Rendering scene with {}x anti-aliasing...", args.aa_samples);
-    } else {
-        println!("Rendering scene...");
-    }
-
     let aa_samples = args.aa_samples;
     let samples_per_pixel = (aa_samples * aa_samples) as f32;
     let inv_spp = 1.0 / samples_per_pixel;
@@ -262,6 +256,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         args.tile_size.clamp(1, WIDTH.min(HEIGHT))
     };
+
+    let tiles: Vec<Tile> = (0..HEIGHT)
+        .step_by(tile_size)
+        .flat_map(|y| {
+            (0..WIDTH).step_by(tile_size).map(move |x| Tile {
+                x_start: x,
+                y_start: y,
+                width: tile_size.min(WIDTH - x),
+                height: tile_size.min(HEIGHT - y),
+            })
+        })
+        .collect();
+
+    // Display rendering statistics
+    println!("┌─────────────────────────────────────────┐");
+    println!("│            RENDERING STATISTICS         │");
+    println!("├─────────────────────────────────────────┤");
+    println!("│ Resolution:      {:>6} x {:<6}        │", WIDTH, HEIGHT);
+    println!("│ Objects:         {:>6}                  │", args.object_count);
+    println!("│ Max depth:       {:>6}                  │", args.max_depth);
+    println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
+    println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
+    println!("│ AA samples:      {:>6}x{:<5}            │", args.aa_samples, args.aa_samples);
+    println!("│ Tile size:       {:>6}                  │", tile_size);
+    println!("│ Tiles count:     {:>6}                  │", tiles.len());
+    println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
+    println!("│ Adaptive AA:     {:>6}                  │", if args.adaptive_aa { "YES" } else { "NO" });
+    println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
+    println!("│ Output file:     {:>6}                  │", "output.png");
+    println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
+    println!("└─────────────────────────────────────────┘");
+
+    if args.aa_samples > 1 {
+        println!("Rendering scene with {}x anti-aliasing...", args.aa_samples);
+    } else {
+        println!("Rendering scene...");
+    }
+
     let tiles: Vec<Tile> = (0..HEIGHT)
         .step_by(tile_size)
         .flat_map(|y| {
