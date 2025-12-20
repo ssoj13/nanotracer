@@ -16,6 +16,8 @@ A high-performance raytracer implementation in Rust, featuring reflection, refra
 - **Configurable depth limits** via command line arguments
 - **Material system** supporting ivory, glass, rubber, and mirror surfaces
 - **Checkerboard ground plane** for visual reference
+- **Gaussian splat export (3DGS PLY)** with view-independent SH0 colors
+- **Mesh primitives** (cube, pyramid, torus) with BVH-accelerated ray intersection
 
 ## Architecture
 
@@ -139,7 +141,28 @@ Options:
   -s, --sky                      Use procedural sky gradient instead of solid background
   -e, --exp <EXPOSURE>           Exposure adjustment for HDR environment maps [default: 0.1]
   -a, --aa <AA_SAMPLES>          Anti-aliasing samples per pixel [default: 1]
+  -t, --tonemap <BOOL>           Enable/disable tonemapping [default: true]
+  -S, --splats <PATH>            Export Gaussian splats to PLY (skip image render)
+      --sh-samples <N>           SH samples per splat [default: 64]
+      --splat-density <D>        Surface samples per unit area [default: 100]
+      --splat-scale <R>          Override splat scale (radius)
+      --mesh <TYPE>              Add mesh primitives: cube, pyramid, torus, all
+      --no-floor                 Disable checkerboard plane
+      --no-spheres               Disable default spheres
   -h, --help                     Print help
+```
+
+### Gaussian Splats
+
+The splat exporter writes **view-independent SH0** (DC only) in 3DGS PLY format.
+High-frequency view effects (specular/refraction) are averaged into a single color.
+
+```bash
+# Balanced preview
+cargo run --release -- -S scene.ply --splat-density 200 --sh-samples 64
+
+# Disable tonemapping (keep linear colors)
+cargo run --release -- -S scene.ply --tonemap false
 ```
 
 ### Environment Options
