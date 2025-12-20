@@ -64,7 +64,7 @@ struct Args {
     refraction_depth: i32,
 
     /// Anti-aliasing samples per pixel
-    #[arg(short = 'a', long = "aa", default_value_t = 1)]
+    #[arg(short = 'a', long = "aa", default_value_t = 2)]
     aa_samples: u32,
 
     /// HDR environment map file (.exr format)
@@ -76,11 +76,11 @@ struct Args {
     exposure: f32,
 
     /// Use procedural sky gradient instead of solid background
-    #[arg(long = "sky")]
+    #[arg(long = "sky", default_value_t = true)]
     use_sky: bool,
 
     /// Tile size for parallel render batches (default: auto-select based on CPU cores)
-    #[arg(long = "tilesize", default_value_t = 0)]
+    #[arg(long = "tilesize", default_value_t = 32)]
     tile_size: usize,
 
     /// Apply tonemapping (Reinhard) before writing colors
@@ -116,7 +116,7 @@ struct Args {
     no_spheres: bool,
 
     /// Enable adaptive anti-aliasing based on pixel contrast
-    #[arg(long = "adaptive-aa", default_value_t = false)]
+    #[arg(long = "adaptive-aa", default_value_t = true)]
     adaptive_aa: bool,
 }
 
