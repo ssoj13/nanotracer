@@ -1,10 +1,9 @@
 pub mod color;
 pub mod environment;
 pub mod geometry;
+pub mod gpu_scene;
 pub mod material;
 pub mod mesh;
-pub mod renderer;
 pub mod scene;
-pub mod simd_renderer;
-pub mod splat;
+pub mod rt_renderer;
 pub mod utils;

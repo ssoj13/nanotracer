@@ -1,25 +1,18 @@
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
-
 use clap::Parser;
 use glam::{Quat, Vec3};
-use indicatif::{ProgressBar, ProgressStyle};
 use nanotracer_rs::environment::EnvironmentMap;
 use nanotracer_rs::geometry::Object;
 use nanotracer_rs::material::{
     GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MIRROR, RED_RUBBER,
 };
-use nanotracer_rs::mesh::{Mesh, cube, pyramid, torus};
-use nanotracer_rs::renderer::{RayConfig, cast_ray_cfg};
+use nanotracer_rs::mesh::{cube, pyramid, torus, Mesh};
+use nanotracer_rs::rt_renderer::{render, RenderConfig};
 use nanotracer_rs::scene::{Light, Scene};
-use nanotracer_rs::splat::{SplatConfig, ply::write_ply, sampler::generate_splats};
 use nanotracer_rs::utils::save_image;
-use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "nanotracer")]
-#[command(about = "A path tracer with Gaussian Splatting export")]
+#[command(about = "A path tracer with GPU ray query (Vulkan)")]
 #[command(after_help = r#"EXAMPLES:
   Rendering:
     nanotracer-rs                           # Basic render, output.png
@@ -35,9 +28,6 @@ use rayon::prelude::*;
     nanotracer-rs --mesh cube                # Add a cube mesh
     nanotracer-rs --mesh torus               # Add a torus mesh
     nanotracer-rs --mesh all                 # Add all mesh primitives
-
-  Gaussian Splats:
-    nanotracer-rs -S scene.ply --splat-density 200 --sh-samples 64
 
   Disable tonemapping (linear colors):
     nanotracer-rs --tonemap false
@@ -79,29 +69,9 @@ struct Args {
     #[arg(long = "sky", default_value_t = true)]
     use_sky: bool,
 
-    /// Tile size for parallel render batches (default: auto-select based on CPU cores)
-    #[arg(long = "tilesize", default_value_t = 32)]
-    tile_size: usize,
-
     /// Apply tonemapping (Reinhard) before writing colors
     #[arg(short = 't', long = "tonemap", default_value_t = true)]
     tonemap: bool,
-
-    /// Export Gaussian splats to PLY file (skips image rendering)
-    #[arg(short = 'S', long = "splats")]
-    splat_output: Option<String>,
-
-    /// SH sampling directions per splat (default: 64)
-    #[arg(long = "sh-samples", default_value_t = 64)]
-    sh_samples: usize,
-
-    /// Surface samples per unit area (default: 100)
-    #[arg(long = "splat-density", default_value_t = 100.0)]
-    splat_density: f32,
-
-    /// Override splat scale (radius). Auto-calculated from density if not set
-    #[arg(long = "splat-scale")]
-    splat_scale: Option<f32>,
 
     /// Add mesh primitives: cube, pyramid, torus, all
     #[arg(long = "mesh")]
@@ -114,24 +84,7 @@ struct Args {
     /// Disable default spheres (mesh-only mode)
     #[arg(long = "no-spheres")]
     no_spheres: bool,
-
-    /// Enable adaptive anti-aliasing based on pixel contrast
-    #[arg(long = "adaptive-aa", default_value_t = true)]
-    adaptive_aa: bool,
 }
-
-#[derive(Debug)]
-struct Tile {
-    x_start: usize,
-    y_start: usize,
-    width: usize,
-    height: usize,
-}
-
-struct FramebufferPtr(*mut Vec3);
-
-unsafe impl Sync for FramebufferPtr {}
-unsafe impl Send for FramebufferPtr {}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -145,7 +98,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| fastrand::u64(..=u64::MAX));
     println!("Scene RNG seed: {}", scene_seed);
 
-    // Environment setup
     if let Some(env_path) = &args.env_path {
         println!(
             "Loading HDR environment map: {} (exposure: {})",
@@ -170,12 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scene.set_environment(EnvironmentMap::procedural_sky());
     }
 
-    // Disable checkerboard if requested
     if args.no_floor {
         scene.checkerboard_enabled = false;
     }
 
-    // Add randomized scene objects
     let mesh_type = args.mesh.as_deref().unwrap_or("all");
     if mesh_type != "none" || !args.no_spheres {
         add_random_objects(
@@ -186,8 +136,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(scene_seed),
         );
     }
-
-    scene.rebuild_scene_bvh();
 
     // Add lights
     scene.add_light(Light {
@@ -200,163 +148,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position: Vec3::new(30.0, 20.0, 30.0),
     });
 
-    use std::time::Instant;
+    println!("GPU renderer: Vulkan ray query");
+    println!("Resolution: {}x{}", WIDTH, HEIGHT);
+    println!("AA: {}x{}", args.aa_samples, args.aa_samples);
 
-    // Start timing for both modes
-    let start_time = Instant::now();
+    let config = RenderConfig {
+        width: WIDTH as u32,
+        height: HEIGHT as u32,
+        fov: FOV,
+        aa_samples: args.aa_samples,
+        max_depth: args.max_depth,
+        reflection_depth: args.reflection_depth,
+        refraction_depth: args.refraction_depth,
+        tonemap: args.tonemap,
+    };
 
-    // Splat generation mode
-    if let Some(splat_path) = &args.splat_output {
-        // Display splat generation statistics
-        println!("┌─────────────────────────────────────────┐");
-        println!("│         SPLAT GENERATION STATISTICS     │");
-        println!("├─────────────────────────────────────────┤");
-        println!("│ Objects:         {:>6}                  │", args.object_count);
-        println!("│ Max depth:       {:>6}                  │", args.max_depth);
-        println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
-        println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
-        println!("│ Splat density:   {:>6}                  │", args.splat_density);
-        println!("│ SH samples:      {:>6}                  │", args.sh_samples);
-        println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
-        println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
-        println!("│ Output file:     {:>6}                  │", splat_path);
-        println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
-        println!("└─────────────────────────────────────────┘");
-
-        println!("Generating Gaussian splats...");
-        let config = SplatConfig {
-            density: args.splat_density,
-            sh_samples: args.sh_samples,
-            max_depth: args.max_depth,
-            reflection_depth: args.reflection_depth,
-            refraction_depth: args.refraction_depth,
-            scale_override: args.splat_scale,
-            tonemap: args.tonemap,
-        };
-
-        let gaussians = generate_splats(&scene, &config);
-
-        let path = Path::new(splat_path);
-        println!("Writing {} gaussians to {}...", gaussians.len(), splat_path);
-        write_ply(path, &gaussians)?;
-
-        let file_size = std::fs::metadata(path)?.len();
-        let elapsed = start_time.elapsed();
-        println!("Splat generation complete!");
-        println!("  Output: {}", splat_path);
-        println!("  Gaussians: {}", gaussians.len());
-        println!("  File size: {:.2} MB", file_size as f64 / 1_000_000.0);
-        println!("  Time elapsed: {:.2?}", elapsed);
-
-        return Ok(());
-    }
-
-    // Display rendering statistics
-    let tile_size = auto_tile_size(args.tile_size, WIDTH.min(HEIGHT));
-    let tiles_count = WIDTH.div_ceil(tile_size) * HEIGHT.div_ceil(tile_size);
-    let ray_cfg = RayConfig::new(args.max_depth, args.reflection_depth, args.refraction_depth);
-
-    println!("┌─────────────────────────────────────────┐");
-    println!("│            RENDERING STATISTICS         │");
-    println!("├─────────────────────────────────────────┤");
-    println!("│ Resolution:      {:>6} x {:<6}        │", WIDTH, HEIGHT);
-    println!("│ Objects:         {:>6}                  │", args.object_count);
-    println!("│ Max depth:       {:>6}                  │", args.max_depth);
-    println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
-    println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
-    println!("│ AA samples:      {:>6}x{:<5}            │", args.aa_samples, args.aa_samples);
-    println!("│ Tile size:       {:>6}                  │", tile_size);
-    println!("│ Tiles count:     {:>6}                  │", tiles_count);
-    println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
-    println!("│ Adaptive AA:     {:>6}                  │", if args.adaptive_aa { "YES" } else { "NO" });
-    println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
-    println!("│ Output file:     {:>6}                  │", "output.png");
-    println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
-    println!("└─────────────────────────────────────────┘");
-
-    let mut framebuffer = vec![Vec3::ZERO; WIDTH * HEIGHT];
-
-    let aa_samples = args.aa_samples;
-    let samples_per_pixel = (aa_samples * aa_samples) as f32;
-    let inv_spp = 1.0 / samples_per_pixel;
-    let half_width = WIDTH as f32 * 0.5;
-    let half_height = HEIGHT as f32 * 0.5;
-    let fov_scale = (FOV / 2.0).tan();
-    let dir_z = -(HEIGHT as f32) / (2.0 * fov_scale);
-
-    let tiles: Vec<Tile> = (0..HEIGHT)
-        .step_by(tile_size)
-        .flat_map(|y| {
-            (0..WIDTH).step_by(tile_size).map(move |x| Tile {
-                x_start: x,
-                y_start: y,
-                width: tile_size.min(WIDTH - x),
-                height: tile_size.min(HEIGHT - y),
-            })
-        })
-        .collect();
-
-    if args.aa_samples > 1 {
-        println!("Rendering scene with {}x anti-aliasing...", args.aa_samples);
-    } else {
-        println!("Rendering scene...");
-    }
-
-    let framebuffer_ptr = Arc::new(FramebufferPtr(framebuffer.as_mut_ptr()));
-    let pb = Arc::new({
-        let pb = ProgressBar::new(tiles.len() as u64);
-        let style =
-            ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} tiles ({eta})")
-                .unwrap()
-                .progress_chars("=>-");
-        pb.set_style(style);
-        pb.set_message("Rendering");
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb
-    });
-    tiles.par_iter().for_each(|tile| {
-        let framebuffer_ptr = framebuffer_ptr.clone();
-        let pb = pb.clone();
-        for y in tile.y_start..(tile.y_start + tile.height) {
-            let row_offset = y * WIDTH;
-            for x in tile.x_start..(tile.x_start + tile.width) {
-                let mut color = Vec3::ZERO;
-
-                // Quasi-Monte Carlo sampling with Halton sequence
-                for sample in 0..(aa_samples * aa_samples) {
-                    let jitter_x = halton_sequence(sample, 2);
-                    let jitter_y = halton_sequence(sample, 3);
-
-                    let dir_x = (x as f32 + jitter_x) - half_width;
-                    let dir_y = -(y as f32 + jitter_y) + half_height;
-                    let direction = Vec3::new(dir_x, dir_y, dir_z).normalize();
-                    
-                    color += cast_ray_cfg(&scene, Vec3::ZERO, direction, 0, 0, 0, &ray_cfg);
-                }
-                color *= inv_spp;
-
-                let idx = row_offset + x;
-                unsafe {
-                    *framebuffer_ptr.0.add(idx) = color;
-                }
-            }
-        }
-        pb.inc(1);
-    });
-
-    pb.finish_with_message("Rendering complete");
-
-    let elapsed = start_time.elapsed();
-    println!("Render complete! Time elapsed: {:.2?}", elapsed);
+    println!("Rendering on GPU...");
+    let framebuffer = render(&scene, &config)?;
 
     println!("Saving image...");
-    save_image(
-        &framebuffer,
-        WIDTH as u32,
-        HEIGHT as u32,
-        "output.png",
-        args.tonemap,
-    )?;
+    save_image(&framebuffer, WIDTH as u32, HEIGHT as u32, "output.png", args.tonemap)?;
 
     println!("Image saved as output.png");
     Ok(())
@@ -511,36 +322,4 @@ fn add_random_objects(
             }
         }
     }
-}
-
-/// Auto-select optimal tile size based on CPU cores
-#[inline]
-fn auto_tile_size(requested: usize, max_size: usize) -> usize {
-    if requested == 0 {
-        match num_cpus::get() {
-            0..=2 => 32,
-            3..=4 => 24,
-            5..=8 => 16,
-            9..=16 => 12,
-            _ => 8,
-        }
-    } else {
-        requested.clamp(1, max_size)
-    }
-}
-
-/// Generate Halton sequence for Quasi-Monte Carlo sampling
-#[inline]
-fn halton_sequence(index: u32, base: u32) -> f32 {
-    let mut result = 0.0;
-    let mut fraction = 1.0 / base as f32;
-    let mut i = index;
-
-    while i > 0 {
-        result += (i % base) as f32 * fraction;
-        i /= base;
-        fraction /= base as f32;
-    }
-
-    result
 }

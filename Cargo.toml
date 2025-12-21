@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rayon = "1.11"
 glam = "0.30"
 image = "0.25"
 clap = { version = "4.5", features = ["derive"] }
 exr = "1.74"
 fastrand = "2.3"
-rtbvh = "0.6.2"
-indicatif = "0.18"
-wide = "1.1"
 num_cpus = "1.16"
+rtbvh = "0.6.2"
+ash = "0.38"
+shaderc = "0.9"
+bytemuck = { version = "1.16", features = ["derive"] }

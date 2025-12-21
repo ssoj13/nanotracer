@@ -1,6 +1,6 @@
 # NanoTracer-RS
 
-High-performance path tracer in Rust with **Gaussian Splatting (3DGS) export**.
+High-performance path tracer in Rust with **GPU ray queries (Vulkan)**.
 
 Based on [tinyraytracer](https://github.com/ssloy/tinyraytracer) by Dmitry V. Sokolov.
 
@@ -8,13 +8,11 @@ Based on [tinyraytracer](https://github.com/ssloy/tinyraytracer) by Dmitry V. So
 
 ## Features
 
+- **GPU ray tracing** via Vulkan ray queries (hardware BVH)
 - **Path tracing** with reflection, refraction, soft shadows
-- **Parallel rendering** via Rayon (scales to all CPU cores)
-- **SIMD optimization** with `wide` crate for vectorized ray casting
-- **Mesh primitives** (cube, pyramid, torus) with BVH acceleration
+- **Mesh primitives** (cube, pyramid, torus) with BVH acceleration on GPU
 - **HDR environment maps** (.exr) or procedural sky
-- **Adaptive anti-aliasing** with Halton quasi-Monte Carlo sampling
-- **Gaussian splat export** to 3DGS-compatible PLY format
+- **Anti-aliasing** with Halton quasi-Monte Carlo sampling
 
 ## Quick Start
 
@@ -34,23 +32,6 @@ cargo run --release -- -e data/studio.exr -x 0.15
 cargo run --release -- --mesh all -a 4
 ```
 
-## Gaussian Splatting Export
-
-Export scene as 3D Gaussian Splats for real-time rendering:
-
-```bash
-# Generate splats (view-independent SH0 color)
-cargo run --release -- -S output.ply --splat-density 200
-
-# Custom parameters
-cargo run --release -- -S scene.ply \
-    --splat-density 500 \
-    --sh-samples 64 \
-    --mesh torus
-```
-
-**Output format:** Standard 3DGS PLY compatible with SuperSplat, Luma AI, bevy_gaussian_splatting.
-
 ## CLI Options
 
 | Option | Description |
@@ -66,11 +47,7 @@ cargo run --release -- -S scene.ply \
 | `--mesh TYPE` | Add mesh: cube, pyramid, torus, all |
 | `--no-floor` | Disable checkerboard plane |
 | `--no-spheres` | Mesh-only mode |
-| `-S, --splats FILE` | Export Gaussian splats to PLY |
-| `--splat-density N` | Samples per unit area (default: 100) |
-| `--sh-samples N` | SH sampling rays (default: 64) |
 | `-t, --tonemap` | Apply Reinhard tonemapping |
-| `--adaptive-aa` | Adaptive sampling (default: on) |
 
 ## Materials
 
@@ -85,37 +62,31 @@ cargo run --release -- -S scene.ply \
 
 ```
 src/
-├── main.rs          # CLI, scene setup, render loop
-├── renderer.rs      # Ray casting, RayConfig, lighting
-├── simd_renderer.rs # SIMD-optimized Vec3x4, ray-sphere
-├── scene.rs         # Scene graph, BVH traversal
-├── geometry.rs      # Sphere, Object, intersection
-├── mesh.rs          # Triangle mesh with BVH (rtbvh)
-├── material.rs      # Material definitions
-├── environment.rs   # HDR/procedural sky
-├── color.rs         # Tonemapping, sRGB conversion
-└── splat/           # Gaussian splatting module
-    ├── sampler.rs   # Surface sampling (Fibonacci sphere)
-    ├── sh.rs        # Spherical harmonics fitting
-    └── ply.rs       # PLY file writer
+|-- main.rs          # CLI, scene setup
+|-- rt_renderer.rs   # Vulkan ray query renderer
+|-- gpu_scene.rs     # GPU scene packing
+|-- scene.rs         # Scene graph
+|-- geometry.rs      # Sphere, Object
+|-- mesh.rs          # Triangle meshes
+|-- material.rs      # Material definitions
+|-- environment.rs   # HDR/procedural sky
+|-- color.rs         # Tonemapping, sRGB conversion
+|-- utils.rs         # PNG output
 ```
 
 ## Dependencies
 
-- **rayon** - parallel iteration
 - **glam** - vector math
-- **wide** - SIMD operations
-- **rtbvh** - BVH acceleration
+- **ash** - Vulkan bindings
+- **shaderc** - GLSL to SPIR-V compilation
 - **image** - PNG output
 - **exr** - HDR environment loading
 - **clap** - CLI parsing
 
 ## Performance
 
-- 24 cores: ~1s for 50 objects at 2x AA
-- SIMD sphere intersection (4 rays/batch)
-- Auto tile sizing based on CPU cores
-- BVH acceleration for meshes
+- Requires a Vulkan-capable GPU with `VK_KHR_ray_query`
+- Hardware BVH acceleration via Vulkan ray queries
 
 ## License
 

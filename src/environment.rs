@@ -17,6 +17,14 @@ pub struct EnvironmentMap {
     exposure: f32,
 }
 
+pub struct EnvGpuData {
+    pub data: Vec<[f32; 4]>,
+    pub width: u32,
+    pub height: u32,
+    pub exposure: f32,
+    pub use_sky: bool,
+}
+
 impl EnvironmentMap {
     /// Load HDR environment map from EXR file
     pub fn from_exr(path: &str, exposure: f32) -> Result<Self, Box<dyn std::error::Error>> {
@@ -144,6 +152,31 @@ impl EnvironmentMap {
     /// Get height of environment map
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn gpu_data(&self) -> EnvGpuData {
+        let (width, height) = if self.use_sky {
+            (1, 1)
+        } else {
+            (self.width.max(1), self.height.max(1))
+        };
+
+        let data = if self.use_sky {
+            vec![[0.0, 0.0, 0.0, 1.0]]
+        } else {
+            self.data
+                .iter()
+                .map(|v| [v.x, v.y, v.z, 1.0])
+                .collect()
+        };
+
+        EnvGpuData {
+            data,
+            width,
+            height,
+            exposure: self.exposure,
+            use_sky: self.use_sky,
+        }
     }
 }
 
