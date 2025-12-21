@@ -7,7 +7,9 @@ use nanotracer_rs::material::{
 };
 use nanotracer_rs::mesh::{cube, pyramid, torus, Mesh};
 use nanotracer_rs::rt_renderer::{render, RenderConfig};
+use nanotracer_rs::rt_splats::{generate_splats_gpu, SplatConfigGpu};
 use nanotracer_rs::scene::{Light, Scene};
+use nanotracer_rs::splat_gpu::write_ply;
 use nanotracer_rs::utils::save_image;
 
 #[derive(Parser)]
@@ -28,6 +30,9 @@ use nanotracer_rs::utils::save_image;
     nanotracer-rs --mesh cube                # Add a cube mesh
     nanotracer-rs --mesh torus               # Add a torus mesh
     nanotracer-rs --mesh all                 # Add all mesh primitives
+
+  Gaussian Splats (GPU):
+    nanotracer-rs -S scene.ply --splat-density 200 --sh-samples 64
 
   Disable tonemapping (linear colors):
     nanotracer-rs --tonemap false
@@ -72,6 +77,22 @@ struct Args {
     /// Apply tonemapping (Reinhard) before writing colors
     #[arg(short = 't', long = "tonemap", default_value_t = true)]
     tonemap: bool,
+
+    /// Export Gaussian splats to PLY file (GPU mode)
+    #[arg(short = 'S', long = "splats")]
+    splat_output: Option<String>,
+
+    /// SH sampling directions per splat (default: 64)
+    #[arg(long = "sh-samples", default_value_t = 64)]
+    sh_samples: u32,
+
+    /// Surface samples per unit area (default: 100)
+    #[arg(long = "splat-density", default_value_t = 100.0)]
+    splat_density: f32,
+
+    /// Override splat scale (radius). Auto-calculated from density if not set
+    #[arg(long = "splat-scale")]
+    splat_scale: Option<f32>,
 
     /// Add mesh primitives: cube, pyramid, torus, all
     #[arg(long = "mesh")]
@@ -148,28 +169,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position: Vec3::new(30.0, 20.0, 30.0),
     });
 
-    println!("GPU renderer: Vulkan ray query");
-    println!("Resolution: {}x{}", WIDTH, HEIGHT);
-    println!("AA: {}x{}", args.aa_samples, args.aa_samples);
+    if let Some(splat_path) = &args.splat_output {
+        println!("GPU splat generation...");
+        let config = SplatConfigGpu {
+            density: args.splat_density,
+            sh_samples: args.sh_samples,
+            max_depth: args.max_depth,
+            reflection_depth: args.reflection_depth,
+            refraction_depth: args.refraction_depth,
+            scale_override: args.splat_scale,
+            tonemap: args.tonemap,
+            seed: scene_seed,
+        };
+        let gaussians = generate_splats_gpu(&scene, &config)?;
+        let path = std::path::Path::new(splat_path);
+        println!("Writing {} gaussians to {}...", gaussians.len(), splat_path);
+        write_ply(path, &gaussians)?;
+        println!("Splat generation complete");
+    } else {
+        println!("GPU renderer: Vulkan ray query");
+        println!("Resolution: {}x{}", WIDTH, HEIGHT);
+        println!("AA: {}x{}", args.aa_samples, args.aa_samples);
 
-    let config = RenderConfig {
-        width: WIDTH as u32,
-        height: HEIGHT as u32,
-        fov: FOV,
-        aa_samples: args.aa_samples,
-        max_depth: args.max_depth,
-        reflection_depth: args.reflection_depth,
-        refraction_depth: args.refraction_depth,
-        tonemap: args.tonemap,
-    };
+        let config = RenderConfig {
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            fov: FOV,
+            aa_samples: args.aa_samples,
+            max_depth: args.max_depth,
+            reflection_depth: args.reflection_depth,
+            refraction_depth: args.refraction_depth,
+            tonemap: args.tonemap,
+        };
 
-    println!("Rendering on GPU...");
-    let framebuffer = render(&scene, &config)?;
+        println!("Rendering on GPU...");
+        let framebuffer = render(&scene, &config)?;
 
-    println!("Saving image...");
-    save_image(&framebuffer, WIDTH as u32, HEIGHT as u32, "output.png", args.tonemap)?;
+        println!("Saving image...");
+        save_image(&framebuffer, WIDTH as u32, HEIGHT as u32, "output.png", args.tonemap)?;
 
-    println!("Image saved as output.png");
+        println!("Image saved as output.png");
+    }
     Ok(())
 }
 

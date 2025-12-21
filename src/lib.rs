@@ -4,6 +4,8 @@ pub mod geometry;
 pub mod gpu_scene;
 pub mod material;
 pub mod mesh;
+pub mod rt_splats;
 pub mod scene;
 pub mod rt_renderer;
+pub mod splat_gpu;
 pub mod utils;

@@ -35,6 +35,8 @@ pub struct GpuSceneData {
     pub normals: Vec<[f32; 4]>,
     pub triangles: Vec<GpuTriangle>,
     pub tri_materials: Vec<u32>,
+    pub tri_cdf: Vec<f32>,
+    pub tri_areas: Vec<f32>,
     pub materials: Vec<GpuMaterial>,
     pub lights: Vec<[f32; 4]>,
 }
@@ -58,6 +60,7 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
     let mut normals: Vec<[f32; 4]> = Vec::new();
     let mut triangles: Vec<GpuTriangle> = Vec::new();
     let mut tri_materials: Vec<u32> = Vec::new();
+    let mut tri_areas: Vec<f32> = Vec::new();
     let mut materials: Vec<GpuMaterial> = Vec::new();
 
     for object in &scene.objects {
@@ -74,6 +77,7 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
                     &mut normals,
                     &mut triangles,
                     &mut tri_materials,
+                    &mut tri_areas,
                 );
             }
             Geometry::Mesh(mesh) => {
@@ -84,6 +88,7 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
                     &mut normals,
                     &mut triangles,
                     &mut tri_materials,
+                    &mut tri_areas,
                 );
             }
         }
@@ -104,6 +109,7 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
             &mut normals,
             &mut triangles,
             &mut tri_materials,
+            &mut tri_areas,
         );
     }
 
@@ -113,11 +119,23 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
         .map(|l| [l.position.x, l.position.y, l.position.z, 1.0])
         .collect::<Vec<_>>();
 
+    let mut tri_cdf = Vec::with_capacity(tri_areas.len());
+    let total_area: f32 = tri_areas.iter().sum();
+    let mut accum = 0.0f32;
+    if total_area > 0.0 {
+        for area in &tri_areas {
+            accum += *area / total_area;
+            tri_cdf.push(accum);
+        }
+    }
+
     GpuSceneData {
         vertices,
         normals,
         triangles,
         tri_materials,
+        tri_cdf,
+        tri_areas,
         materials,
         lights,
     }
@@ -130,6 +148,7 @@ fn append_mesh(
     normals: &mut Vec<[f32; 4]>,
     triangles: &mut Vec<GpuTriangle>,
     tri_materials: &mut Vec<u32>,
+    tri_areas: &mut Vec<f32>,
 ) {
     let base = vertices.len() as u32;
     vertices.extend(mesh.vertices.iter().map(|v| [v.x, v.y, v.z, 1.0]));
@@ -147,6 +166,11 @@ fn append_mesh(
             _pad: 0,
         });
         tri_materials.push(material_index);
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        let area = (v1 - v0).cross(v2 - v0).length() * 0.5;
+        tri_areas.push(area.max(0.0));
     }
 }
 

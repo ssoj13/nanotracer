@@ -9,24 +9,25 @@ use glam::Vec3;
 use crate::environment::EnvGpuData;
 use crate::gpu_scene::build_gpu_scene;
 use crate::scene::Scene;
+use crate::splat_gpu::Gaussian;
 
-pub struct RenderConfig {
-    pub width: u32,
-    pub height: u32,
-    pub fov: f32,
-    pub aa_samples: u32,
+pub struct SplatConfigGpu {
+    pub density: f32,
+    pub sh_samples: u32,
     pub max_depth: i32,
     pub reflection_depth: i32,
     pub refraction_depth: i32,
+    pub scale_override: Option<f32>,
     pub tonemap: bool,
+    pub seed: u64,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Zeroable, Pod)]
 struct GpuParams {
-    width: u32,
-    height: u32,
-    aa_samples: u32,
+    sample_count: u32,
+    tri_count: u32,
+    sh_samples: u32,
     max_depth: u32,
     reflection_depth: u32,
     refraction_depth: u32,
@@ -37,14 +38,36 @@ struct GpuParams {
     env_height: u32,
     tonemap: u32,
     exposure: f32,
-    fov: f32,
-    _pad0: u32,
-    _pad1: u32,
+    splat_scale: f32,
+    seed_lo: u32,
+    seed_hi: u32,
 }
 
-pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn std::error::Error>> {
+#[repr(C)]
+#[derive(Clone, Copy, Zeroable, Pod)]
+struct GpuGaussian {
+    pos: [f32; 4],
+    normal: [f32; 4],
+    sh_dc: [f32; 4],
+    sh_rest: [[f32; 4]; 12],
+    opacity_scale: [f32; 4],
+    rotation: [f32; 4],
+}
+
+pub fn generate_splats_gpu(
+    scene: &Scene,
+    config: &SplatConfigGpu,
+) -> Result<Vec<Gaussian>, Box<dyn std::error::Error>> {
     let gpu_scene = build_gpu_scene(scene);
     let env = scene.environment.as_ref().map(|env| env.gpu_data());
+
+    let total_area: f32 = gpu_scene.tri_areas.iter().sum();
+    if total_area <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let sample_count = (total_area * config.density).ceil().max(1.0) as u32;
+
+    let splat_scale = config.scale_override.unwrap_or_else(|| estimate_scale(config.density, 2.0));
 
     let entry = unsafe { ash::Entry::load()? };
 
@@ -202,6 +225,14 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
+    let cdf_buffer = create_buffer_with_data(
+        &instance,
+        &device,
+        physical_device,
+        &gpu_scene.tri_cdf,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
+    )?;
+
     let (blas, tlas) = build_acceleration_structures(
         &instance,
         &device,
@@ -249,28 +280,10 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         )?
     };
 
-    let output_image = create_storage_image(
-        &instance,
-        &device,
-        physical_device,
-        config.width,
-        config.height,
-        vk::Format::R32G32B32A32_SFLOAT,
-    )?;
-
-    let output_buffer = create_buffer(
-        &instance,
-        &device,
-        physical_device,
-        (config.width * config.height * 4 * mem::size_of::<f32>() as u32) as vk::DeviceSize,
-        vk::BufferUsageFlags::TRANSFER_DST,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    )?;
-
     let params = GpuParams {
-        width: config.width,
-        height: config.height,
-        aa_samples: config.aa_samples,
+        sample_count,
+        tri_count: gpu_scene.triangles.len() as u32,
+        sh_samples: config.sh_samples.max(1),
         max_depth: config.max_depth.max(1) as u32,
         reflection_depth: config.reflection_depth.max(0) as u32,
         refraction_depth: config.refraction_depth.max(0) as u32,
@@ -281,9 +294,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         env_height: env_data.height,
         tonemap: if config.tonemap { 1 } else { 0 },
         exposure: env_data.exposure,
-        fov: config.fov,
-        _pad0: 0,
-        _pad1: 0,
+        splat_scale,
+        seed_lo: (config.seed & 0xFFFF_FFFF) as u32,
+        seed_hi: ((config.seed >> 32) & 0xFFFF_FFFF) as u32,
     };
 
     let params_buffer = create_buffer_with_data(
@@ -294,7 +307,16 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         vk::BufferUsageFlags::UNIFORM_BUFFER,
     )?;
 
-    let descriptor_set_layout = create_descriptor_set_layout(&device)?;
+    let output_buffer = create_buffer(
+        &instance,
+        &device,
+        physical_device,
+        (sample_count as usize * mem::size_of::<GpuGaussian>()) as vk::DeviceSize,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
+
+    let descriptor_set_layout = create_splat_descriptor_set_layout(&device)?;
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo {
@@ -306,8 +328,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         )?
     };
 
-    let shader_module = create_shader_module(&device, COMPUTE_SHADER)?;
-
+    let shader_module = create_shader_module(&device, SPLAT_SHADER)?;
     let stage_info = vk::PipelineShaderStageCreateInfo {
         stage: vk::ShaderStageFlags::COMPUTE,
         module: shader_module,
@@ -334,12 +355,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
             descriptor_count: 1,
         },
         vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::STORAGE_IMAGE,
-            descriptor_count: 1,
-        },
-        vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 6,
+            descriptor_count: 7,
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -372,17 +389,18 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         })?
     }[0];
 
-    write_descriptor_set(
+    write_splat_descriptor_set(
         &device,
         descriptor_set,
         &tlas,
-        &output_image,
         &vertices_buffer,
         &normals_buffer,
         &triangles_buffer,
         &materials_buffer,
         &tri_materials_buffer,
         &lights_buffer,
+        &cdf_buffer,
+        &output_buffer,
         &params_buffer,
         env_sampler,
         &env_image,
@@ -390,14 +408,6 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
 
     unsafe {
         device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())?;
-
-        transition_image(
-            &device,
-            command_buffer,
-            output_image.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::GENERAL,
-        );
 
         device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
         device.cmd_bind_descriptor_sets(
@@ -409,40 +419,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
             &[],
         );
 
-        let group_x = (config.width + 7) / 8;
-        let group_y = (config.height + 7) / 8;
-        device.cmd_dispatch(command_buffer, group_x, group_y, 1);
-
-        transition_image(
-            &device,
-            command_buffer,
-            output_image.image,
-            vk::ImageLayout::GENERAL,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-        );
-
-        let region = vk::BufferImageCopy {
-            image_subresource: vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                mip_level: 0,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-            image_extent: vk::Extent3D {
-                width: config.width,
-                height: config.height,
-                depth: 1,
-            },
-            ..Default::default()
-        };
-
-        device.cmd_copy_image_to_buffer(
-            command_buffer,
-            output_image.image,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            output_buffer.buffer,
-            &[region],
-        );
+        let group_x = (sample_count + 63) / 64;
+        device.cmd_dispatch(command_buffer, group_x, 1, 1);
 
         device.end_command_buffer(command_buffer)?;
 
@@ -463,13 +441,26 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
             vk::MemoryMapFlags::empty(),
         )?;
         let slice = std::slice::from_raw_parts(
-            ptr as *const f32,
-            (config.width * config.height * 4) as usize,
+            ptr as *const GpuGaussian,
+            sample_count as usize,
         );
-        let mut result = Vec::with_capacity((config.width * config.height) as usize);
-        for i in 0..(config.width * config.height) as usize {
-            let base = i * 4;
-            result.push(Vec3::new(slice[base], slice[base + 1], slice[base + 2]));
+        let mut result = Vec::with_capacity(sample_count as usize);
+        for g in slice {
+            let sh_rest = g
+                .sh_rest
+                .iter()
+                .flat_map(|v| v.iter().copied())
+                .take(45)
+                .collect::<Vec<f32>>();
+            result.push(Gaussian {
+                pos: Vec3::new(g.pos[0], g.pos[1], g.pos[2]),
+                normal: Vec3::new(g.normal[0], g.normal[1], g.normal[2]),
+                sh_dc: [g.sh_dc[0], g.sh_dc[1], g.sh_dc[2]],
+                sh_rest,
+                opacity: g.opacity_scale[0],
+                scale: [g.opacity_scale[1], g.opacity_scale[2], g.opacity_scale[3]],
+                rotation: g.rotation,
+            });
         }
         device.unmap_memory(output_buffer.memory);
         result
@@ -478,15 +469,15 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
     unsafe {
         device.destroy_sampler(env_sampler, None);
         destroy_image(&device, &env_image);
-        destroy_image(&device, &output_image);
         destroy_buffer(&device, &params_buffer);
         destroy_buffer(&device, &output_buffer);
+        destroy_buffer(&device, &cdf_buffer);
         destroy_buffer(&device, &lights_buffer);
         destroy_buffer(&device, &tri_materials_buffer);
         destroy_buffer(&device, &materials_buffer);
         destroy_buffer(&device, &indices_buffer);
-        destroy_buffer(&device, &normals_buffer);
         destroy_buffer(&device, &triangles_buffer);
+        destroy_buffer(&device, &normals_buffer);
         destroy_buffer(&device, &vertices_buffer);
 
         accel_loader.destroy_acceleration_structure(blas.handle, None);
@@ -507,6 +498,12 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
     }
 
     Ok(data)
+}
+
+fn estimate_scale(density: f32, overlap: f32) -> f32 {
+    let area_per_sample = 1.0 / density;
+    let base_radius = (area_per_sample / std::f32::consts::PI).sqrt();
+    base_radius * overlap
 }
 
 fn pick_device(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32), Box<dyn std::error::Error>> {
@@ -801,6 +798,7 @@ fn build_acceleration_structures(
     let instance_flags =
         vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw()
             | vk::GeometryInstanceFlagsKHR::FORCE_OPAQUE.as_raw();
+
     let instance_data = AccelInstance {
         transform: [
             1.0, 0.0, 0.0, 0.0,
@@ -957,25 +955,6 @@ struct ImageResource {
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
-}
-
-fn create_storage_image(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    width: u32,
-    height: u32,
-    format: vk::Format,
-) -> Result<ImageResource, Box<dyn std::error::Error>> {
-    create_image(
-        instance,
-        device,
-        physical_device,
-        width,
-        height,
-        format,
-        vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
-    )
 }
 
 fn create_image_with_data<T: Pod>(
@@ -1157,7 +1136,7 @@ fn destroy_image(device: &ash::Device, image: &ImageResource) {
     }
 }
 
-fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, vk::Result> {
+fn create_splat_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, vk::Result> {
     let bindings = [
         vk::DescriptorSetLayoutBinding {
             binding: 0,
@@ -1168,7 +1147,7 @@ fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSe
         },
         vk::DescriptorSetLayoutBinding {
             binding: 1,
-            descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::COMPUTE,
             ..Default::default()
@@ -1217,13 +1196,20 @@ fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSe
         },
         vk::DescriptorSetLayoutBinding {
             binding: 8,
-            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::COMPUTE,
             ..Default::default()
         },
         vk::DescriptorSetLayoutBinding {
             binding: 9,
+            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+            ..Default::default()
+        },
+        vk::DescriptorSetLayoutBinding {
+            binding: 10,
             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::COMPUTE,
@@ -1243,17 +1229,19 @@ fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSe
     }
 }
 
-fn write_descriptor_set(
+#[allow(clippy::too_many_arguments)]
+fn write_splat_descriptor_set(
     device: &ash::Device,
     descriptor_set: vk::DescriptorSet,
     tlas: &AccelResource,
-    output_image: &ImageResource,
     vertices: &BufferResource,
     normals: &BufferResource,
     triangles: &BufferResource,
     materials: &BufferResource,
     tri_materials: &BufferResource,
     lights: &BufferResource,
+    cdf: &BufferResource,
+    output: &BufferResource,
     params: &BufferResource,
     sampler: vk::Sampler,
     env_image: &ImageResource,
@@ -1264,26 +1252,20 @@ fn write_descriptor_set(
         ..Default::default()
     };
 
-    let output_info = vk::DescriptorImageInfo {
-        image_view: output_image.view,
-        image_layout: vk::ImageLayout::GENERAL,
-        ..Default::default()
-    };
-
     let vertices_info = vk::DescriptorBufferInfo {
         buffer: vertices.buffer,
         offset: 0,
         range: vertices.size,
     };
-    let triangles_info = vk::DescriptorBufferInfo {
-        buffer: triangles.buffer,
-        offset: 0,
-        range: triangles.size,
-    };
     let normals_info = vk::DescriptorBufferInfo {
         buffer: normals.buffer,
         offset: 0,
         range: normals.size,
+    };
+    let triangles_info = vk::DescriptorBufferInfo {
+        buffer: triangles.buffer,
+        offset: 0,
+        range: triangles.size,
     };
     let materials_info = vk::DescriptorBufferInfo {
         buffer: materials.buffer,
@@ -1299,6 +1281,16 @@ fn write_descriptor_set(
         buffer: lights.buffer,
         offset: 0,
         range: lights.size,
+    };
+    let cdf_info = vk::DescriptorBufferInfo {
+        buffer: cdf.buffer,
+        offset: 0,
+        range: cdf.size,
+    };
+    let output_info = vk::DescriptorBufferInfo {
+        buffer: output.buffer,
+        offset: 0,
+        range: output.size,
     };
     let params_info = vk::DescriptorBufferInfo {
         buffer: params.buffer,
@@ -1326,14 +1318,6 @@ fn write_descriptor_set(
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
             dst_binding: 1,
-            descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
-            descriptor_count: 1,
-            p_image_info: &output_info,
-            ..Default::default()
-        },
-        vk::WriteDescriptorSet {
-            dst_set: descriptor_set,
-            dst_binding: 2,
             descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             p_buffer_info: &vertices_info,
@@ -1341,7 +1325,7 @@ fn write_descriptor_set(
         },
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
-            dst_binding: 3,
+            dst_binding: 2,
             descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             p_buffer_info: &normals_info,
@@ -1349,7 +1333,7 @@ fn write_descriptor_set(
         },
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
-            dst_binding: 4,
+            dst_binding: 3,
             descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             p_buffer_info: &triangles_info,
@@ -1357,7 +1341,7 @@ fn write_descriptor_set(
         },
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
-            dst_binding: 5,
+            dst_binding: 4,
             descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             p_buffer_info: &materials_info,
@@ -1365,7 +1349,7 @@ fn write_descriptor_set(
         },
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
-            dst_binding: 6,
+            dst_binding: 5,
             descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             p_buffer_info: &tri_materials_info,
@@ -1373,7 +1357,7 @@ fn write_descriptor_set(
         },
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
-            dst_binding: 7,
+            dst_binding: 6,
             descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             descriptor_count: 1,
             p_buffer_info: &lights_info,
@@ -1381,7 +1365,23 @@ fn write_descriptor_set(
         },
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
+            dst_binding: 7,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: 1,
+            p_buffer_info: &cdf_info,
+            ..Default::default()
+        },
+        vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
             dst_binding: 8,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: 1,
+            p_buffer_info: &output_info,
+            ..Default::default()
+        },
+        vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
+            dst_binding: 9,
             descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
             descriptor_count: 1,
             p_buffer_info: &params_info,
@@ -1389,7 +1389,7 @@ fn write_descriptor_set(
         },
         vk::WriteDescriptorSet {
             dst_set: descriptor_set,
-            dst_binding: 9,
+            dst_binding: 10,
             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 1,
             p_image_info: &env_info,
@@ -1402,7 +1402,7 @@ fn write_descriptor_set(
 
 fn create_shader_module(device: &ash::Device, source: &str) -> Result<vk::ShaderModule, Box<dyn std::error::Error>> {
     let compiler = shaderc::Compiler::new()?;
-    let binary = compiler.compile_into_spirv(source, shaderc::ShaderKind::Compute, "ray_query.comp", "main", None)?;
+    let binary = compiler.compile_into_spirv(source, shaderc::ShaderKind::Compute, "splat.comp", "main", None)?;
     let module_info = vk::ShaderModuleCreateInfo {
         code_size: binary.as_binary().len() * 4,
         p_code: binary.as_binary().as_ptr(),
@@ -1412,10 +1412,10 @@ fn create_shader_module(device: &ash::Device, source: &str) -> Result<vk::Shader
     Ok(module)
 }
 
-const COMPUTE_SHADER: &str = r#"#version 460
+const SPLAT_SHADER: &str = r#"#version 460
 #extension GL_EXT_ray_query : require
 
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 struct Material {
     vec3 diffuse;
@@ -1427,18 +1427,28 @@ struct Material {
     uint _pad1;
 };
 
+struct GaussianOut {
+    vec4 pos;
+    vec4 normal;
+    vec4 sh_dc;
+    vec4 sh_rest[12];
+    vec4 opacity_scale;
+    vec4 rotation;
+};
+
 layout(set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
-layout(set = 0, binding = 1, rgba32f) uniform image2D outImage;
-layout(set = 0, binding = 2, std430) readonly buffer Vertices { vec4 vertices[]; };
-layout(set = 0, binding = 3, std430) readonly buffer Normals { vec4 normals[]; };
-layout(set = 0, binding = 4, std430) readonly buffer Triangles { uvec4 tris[]; };
-layout(set = 0, binding = 5, std430) readonly buffer Materials { Material materials[]; };
-layout(set = 0, binding = 6, std430) readonly buffer TriMaterials { uint tri_materials[]; };
-layout(set = 0, binding = 7, std430) readonly buffer Lights { vec4 lights[]; };
-layout(set = 0, binding = 8) uniform Params {
-    uint width;
-    uint height;
-    uint aa_samples;
+layout(set = 0, binding = 1, std430) readonly buffer Vertices { vec4 vertices[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Normals { vec4 normals[]; };
+layout(set = 0, binding = 3, std430) readonly buffer Triangles { uvec4 tris[]; };
+layout(set = 0, binding = 4, std430) readonly buffer Materials { Material materials[]; };
+layout(set = 0, binding = 5, std430) readonly buffer TriMaterials { uint tri_materials[]; };
+layout(set = 0, binding = 6, std430) readonly buffer Lights { vec4 lights[]; };
+layout(set = 0, binding = 7, std430) readonly buffer TriCdf { float tri_cdf[]; };
+layout(set = 0, binding = 8, std430) writeonly buffer Gaussians { GaussianOut gaussians[]; };
+layout(set = 0, binding = 9) uniform Params {
+    uint sample_count;
+    uint tri_count;
+    uint sh_samples;
     uint max_depth;
     uint reflection_depth;
     uint refraction_depth;
@@ -1449,27 +1459,18 @@ layout(set = 0, binding = 8) uniform Params {
     uint env_height;
     uint tonemap;
     float exposure;
-    float fov;
-    uint _pad0;
-    uint _pad1;
+    float splat_scale;
+    uint seed_lo;
+    uint seed_hi;
 } params;
-layout(set = 0, binding = 9) uniform sampler2D env_map;
+layout(set = 0, binding = 10) uniform sampler2D env_map;
 
-const uint FLAG_CHECKER = 1u;
 const float EPS = 2e-3;
 const int MAX_STACK = 16;
-
-float halton(uint index, uint base) {
-    float result = 0.0;
-    float f = 1.0 / float(base);
-    uint i = index;
-    while (i > 0u) {
-        result += float(i % base) * f;
-        i /= base;
-        f /= float(base);
-    }
-    return result;
-}
+const float SH_C0 = 0.2820948;
+const float SH_C1 = 0.48860252;
+const float SH_C2[5] = float[5](1.0925485, -1.0925485, 0.31539157, -1.0925485, 0.54627424);
+const float SH_C3[7] = float[7](-0.5900436, 2.8906114, -0.4570458, 0.37317634, -0.4570458, 1.4453057, -0.5900436);
 
 uint wang_hash(uint seed) {
     seed = (seed ^ 61u) ^ (seed >> 16u);
@@ -1570,145 +1571,291 @@ float shadow_ray(vec3 origin, vec3 dir, float dist) {
     return 0.0;
 }
 
-void main() {
-    uvec2 gid = gl_GlobalInvocationID.xy;
-    if (gid.x >= params.width || gid.y >= params.height) {
-        return;
+void build_tangent_frame(vec3 n, out vec3 t, out vec3 b) {
+    if (abs(n.y) < 0.9) {
+        t = normalize(cross(n, vec3(0.0, 1.0, 0.0)));
+    } else {
+        t = normalize(cross(n, vec3(1.0, 0.0, 0.0)));
     }
+    b = cross(n, t);
+}
 
-    float half_w = float(params.width) * 0.5;
-    float half_h = float(params.height) * 0.5;
-    float fov_scale = tan(params.fov * 0.5);
-    float dir_z = -float(params.height) / (2.0 * fov_scale);
+vec3 trace_path(vec3 origin, vec3 dir) {
+    vec3 stack_origin[MAX_STACK];
+    vec3 stack_dir[MAX_STACK];
+    vec3 stack_weight[MAX_STACK];
+    int stack_depth[MAX_STACK];
+    int stack_size = 0;
 
-    uint spp = max(params.aa_samples, 1u);
-    uint sample_count = spp * spp;
-    vec3 final_color = vec3(0.0);
+    stack_origin[stack_size] = origin;
+    stack_dir[stack_size] = dir;
+    stack_weight[stack_size] = vec3(1.0);
+    stack_depth[stack_size] = 0;
+    stack_size++;
 
-    for (uint s = 0u; s < sample_count; ++s) {
-        float jitter_x = halton(s, 2u);
-        float jitter_y = halton(s, 3u);
+    vec3 sample_color = vec3(0.0);
+    int max_depth = min(int(params.max_depth), MAX_STACK - 1);
+    int max_reflect = min(int(params.reflection_depth), MAX_STACK - 1);
+    int max_refract = min(int(params.refraction_depth), MAX_STACK - 1);
 
-        float dir_x = (float(gid.x) + jitter_x) - half_w;
-        float dir_y = -(float(gid.y) + jitter_y) + half_h;
-        vec3 ray_dir = normalize(vec3(dir_x, dir_y, dir_z));
+    while (stack_size > 0) {
+        stack_size--;
+        vec3 o = stack_origin[stack_size];
+        vec3 d = stack_dir[stack_size];
+        vec3 weight = stack_weight[stack_size];
+        int depth = stack_depth[stack_size];
 
-        vec3 stack_origin[MAX_STACK];
-        vec3 stack_dir[MAX_STACK];
-        vec3 stack_weight[MAX_STACK];
-        int stack_depth[MAX_STACK];
-        int stack_size = 0;
+        uint prim_id;
+        vec2 bary;
+        float t_hit;
+        if (!trace_ray(o, d, 10000.0, prim_id, bary, t_hit)) {
+            sample_color += weight * sample_environment(d);
+            continue;
+        }
 
-        stack_origin[stack_size] = vec3(0.0, 0.0, 0.0);
-        stack_dir[stack_size] = ray_dir;
-        stack_weight[stack_size] = vec3(1.0);
-        stack_depth[stack_size] = 0;
-        stack_size++;
+        uvec4 tri = tris[prim_id];
+        vec3 v0 = vertices[tri.x].xyz;
+        vec3 v1 = vertices[tri.y].xyz;
+        vec3 v2 = vertices[tri.z].xyz;
+        vec3 n0 = normals[tri.x].xyz;
+        vec3 n1 = normals[tri.y].xyz;
+        vec3 n2 = normals[tri.z].xyz;
+        float w = 1.0 - bary.x - bary.y;
+        vec3 hit_pos = v0 * w + v1 * bary.x + v2 * bary.y;
+        vec3 normal = normalize(n0 * w + n1 * bary.x + n2 * bary.y);
+        if (dot(normal, d) > 0.0) {
+            normal = -normal;
+        }
 
-        vec3 sample_color = vec3(0.0);
-        int max_depth = min(int(params.max_depth), MAX_STACK - 1);
-        int max_reflect = min(int(params.reflection_depth), MAX_STACK - 1);
-        int max_refract = min(int(params.refraction_depth), MAX_STACK - 1);
+        uint mat_idx = tri_materials[prim_id];
+        Material mat = materials[mat_idx];
+        vec3 diffuse_color = mat.diffuse;
 
-        while (stack_size > 0) {
-            stack_size--;
-            vec3 origin = stack_origin[stack_size];
-            vec3 dir = stack_dir[stack_size];
-            vec3 weight = stack_weight[stack_size];
-            int depth = stack_depth[stack_size];
+        if ((mat.flags & 1u) != 0u) {
+            diffuse_color = checker_color(hit_pos);
+        }
 
-            uint prim_id;
-            vec2 bary;
-            float t;
-            if (!trace_ray(origin, dir, 10000.0, prim_id, bary, t)) {
-                sample_color += weight * sample_environment(dir);
+        float diffuse_intensity = 0.0;
+        float specular_intensity = 0.0;
+
+        for (uint li = 0u; li < params.light_count; ++li) {
+            vec3 light_pos = lights[li].xyz;
+            vec3 light_dir = normalize(light_pos - hit_pos);
+            float light_dist = length(light_pos - hit_pos);
+            vec3 shadow_origin = offset_origin(hit_pos, normal, light_dir);
+            float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
+            if (visibility <= 0.0) {
                 continue;
             }
 
-            uvec4 tri = tris[prim_id];
-            vec3 v0 = vertices[tri.x].xyz;
-            vec3 v1 = vertices[tri.y].xyz;
-            vec3 v2 = vertices[tri.z].xyz;
-            vec3 n0 = normals[tri.x].xyz;
-            vec3 n1 = normals[tri.y].xyz;
-            vec3 n2 = normals[tri.z].xyz;
-            float w = 1.0 - bary.x - bary.y;
-            vec3 hit_pos = v0 * w + v1 * bary.x + v2 * bary.y;
-            vec3 normal = normalize(n0 * w + n1 * bary.x + n2 * bary.y);
-            if (dot(normal, dir) > 0.0) {
-                normal = -normal;
-            }
-
-            uint mat_idx = tri_materials[prim_id];
-            Material mat = materials[mat_idx];
-            vec3 diffuse_color = mat.diffuse;
-
-            if ((mat.flags & FLAG_CHECKER) != 0u) {
-                diffuse_color = checker_color(hit_pos);
-            }
-
-            float diffuse_intensity = 0.0;
-            float specular_intensity = 0.0;
-
-            for (uint li = 0u; li < params.light_count; ++li) {
-                vec3 light_pos = lights[li].xyz;
-                vec3 light_dir = normalize(light_pos - hit_pos);
-                float light_dist = length(light_pos - hit_pos);
-                vec3 shadow_origin = offset_origin(hit_pos, normal, light_dir);
-                float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
-                if (visibility <= 0.0) {
-                    continue;
-                }
-
-                diffuse_intensity += max(dot(light_dir, normal), 0.0);
-                if (mat.albedo.y > 0.0) {
-                    vec3 refl = reflect_dir(-light_dir, normal);
-                    specular_intensity += pow(max(dot(-refl, dir), 0.0), mat.specular_exponent);
-                }
-            }
-
-            vec3 local_color = diffuse_color * diffuse_intensity * mat.albedo.x;
-            local_color += vec3(1.0) * specular_intensity * mat.albedo.y;
-            sample_color += weight * local_color;
-
-            if (depth >= max_depth) {
-                continue;
-            }
-
-            if (depth > 3) {
-                float p = clamp(max_component(weight), 0.05, 0.95);
-                uint seed = gid.x * 1973u + gid.y * 9277u + s * 26699u + uint(depth) * 104729u;
-                if (rand01(seed) > p) {
-                    continue;
-                }
-                weight /= p;
-            }
-
-            if (mat.albedo.z > 0.0 && depth < max_reflect && stack_size < MAX_STACK) {
-                vec3 refl_dir = reflect_dir(dir, normal);
-                vec3 refl_origin = offset_origin(hit_pos, normal, refl_dir);
-                stack_origin[stack_size] = refl_origin;
-                stack_dir[stack_size] = refl_dir;
-                stack_weight[stack_size] = weight * mat.albedo.z;
-                stack_depth[stack_size] = depth + 1;
-                stack_size++;
-            }
-
-            if (mat.albedo.w > 0.0 && depth < max_refract && stack_size < MAX_STACK) {
-                vec3 refr_dir = refract_dir(dir, normal, mat.refractive_index, 1.0);
-                vec3 refr_origin = offset_origin(hit_pos, normal, refr_dir);
-                stack_origin[stack_size] = refr_origin;
-                stack_dir[stack_size] = refr_dir;
-                stack_weight[stack_size] = weight * mat.albedo.w;
-                stack_depth[stack_size] = depth + 1;
-                stack_size++;
+            diffuse_intensity += max(dot(light_dir, normal), 0.0);
+            if (mat.albedo.y > 0.0) {
+                vec3 refl = reflect_dir(-light_dir, normal);
+                specular_intensity += pow(max(dot(-refl, d), 0.0), mat.specular_exponent);
             }
         }
 
-        final_color += sample_color;
+        vec3 local_color = diffuse_color * diffuse_intensity * mat.albedo.x;
+        local_color += vec3(1.0) * specular_intensity * mat.albedo.y;
+        sample_color += weight * local_color;
+
+        if (depth >= max_depth) {
+            continue;
+        }
+
+        if (depth > 3) {
+            float p = clamp(max_component(weight), 0.05, 0.95);
+            uint seed = uint(depth) * 104729u + prim_id * 12289u;
+            if (rand01(seed) > p) {
+                continue;
+            }
+            weight /= p;
+        }
+
+        if (mat.albedo.z > 0.0 && depth < max_reflect && stack_size < MAX_STACK) {
+            vec3 refl_dir = reflect_dir(d, normal);
+            vec3 refl_origin = offset_origin(hit_pos, normal, refl_dir);
+            stack_origin[stack_size] = refl_origin;
+            stack_dir[stack_size] = refl_dir;
+            stack_weight[stack_size] = weight * mat.albedo.z;
+            stack_depth[stack_size] = depth + 1;
+            stack_size++;
+        }
+
+        if (mat.albedo.w > 0.0 && depth < max_refract && stack_size < MAX_STACK) {
+            vec3 refr_dir = refract_dir(d, normal, mat.refractive_index, 1.0);
+            vec3 refr_origin = offset_origin(hit_pos, normal, refr_dir);
+            stack_origin[stack_size] = refr_origin;
+            stack_dir[stack_size] = refr_dir;
+            stack_weight[stack_size] = weight * mat.albedo.w;
+            stack_depth[stack_size] = depth + 1;
+            stack_size++;
+        }
     }
 
-    final_color /= float(sample_count);
-    imageStore(outImage, ivec2(gid), vec4(final_color, 1.0));
+    return sample_color;
+}
+
+float sh_basis(int index, vec3 dir) {
+    float x = dir.x;
+    float y = dir.y;
+    float z = dir.z;
+    float xx = x * x;
+    float yy = y * y;
+    float zz = z * z;
+
+    if (index == 0) return SH_C0;
+    if (index == 1) return -SH_C1 * y;
+    if (index == 2) return SH_C1 * z;
+    if (index == 3) return -SH_C1 * x;
+
+    if (index == 4) return SH_C2[0] * x * y;
+    if (index == 5) return SH_C2[1] * y * z;
+    if (index == 6) return SH_C2[2] * (2.0 * zz - xx - yy);
+    if (index == 7) return SH_C2[3] * x * z;
+    if (index == 8) return SH_C2[4] * (xx - yy);
+
+    if (index == 9) return SH_C3[0] * y * (3.0 * xx - yy);
+    if (index == 10) return SH_C3[1] * x * y * z;
+    if (index == 11) return SH_C3[2] * y * (4.0 * zz - xx - yy);
+    if (index == 12) return SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
+    if (index == 13) return SH_C3[4] * x * (4.0 * zz - xx - yy);
+    if (index == 14) return SH_C3[5] * z * (xx - yy);
+    if (index == 15) return SH_C3[6] * x * (xx - 3.0 * yy);
+
+    return 0.0;
+}
+
+vec4 quat_from_normal(vec3 normal) {
+    vec3 z = vec3(0.0, 0.0, 1.0);
+    vec3 n = normalize(normal);
+    float dotv = dot(z, n);
+    if (dotv > 0.99999) {
+        return vec4(1.0, 0.0, 0.0, 0.0);
+    }
+    if (dotv < -0.99999) {
+        return vec4(0.0, 1.0, 0.0, 0.0);
+    }
+    vec3 axis = normalize(cross(z, n));
+    float angle = acos(dotv);
+    float half_angle = angle * 0.5;
+    float s = sin(half_angle);
+    float c = cos(half_angle);
+    return vec4(c, axis.x * s, axis.y * s, axis.z * s);
+}
+
+uint find_triangle(float r) {
+    uint lo = 0u;
+    uint hi = params.tri_count - 1u;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1u;
+        if (r <= tri_cdf[mid]) {
+            hi = mid;
+        } else {
+            lo = mid + 1u;
+        }
+    }
+    return lo;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.sample_count) {
+        return;
+    }
+
+    uint seed_base = params.seed_lo ^ (params.seed_hi * 1664525u);
+    float pick = rand01(seed_base + id * 1013904223u);
+    uint tri_idx = find_triangle(pick);
+
+    uvec4 tri = tris[tri_idx];
+    vec3 v0 = vertices[tri.x].xyz;
+    vec3 v1 = vertices[tri.y].xyz;
+    vec3 v2 = vertices[tri.z].xyz;
+    vec3 n0 = normals[tri.x].xyz;
+    vec3 n1 = normals[tri.y].xyz;
+    vec3 n2 = normals[tri.z].xyz;
+
+    float r1 = rand01(seed_base + id * 73856093u + 1u);
+    float r2 = rand01(seed_base + id * 19349663u + 2u);
+    float sqrt_r1 = sqrt(r1);
+    float u = 1.0 - sqrt_r1;
+    float v = r2 * sqrt_r1;
+    float w = 1.0 - u - v;
+
+    vec3 pos = v0 * w + v1 * u + v2 * v;
+    vec3 normal = normalize(n0 * w + n1 * u + n2 * v);
+
+    uint mat_idx = tri_materials[tri_idx];
+    Material mat = materials[mat_idx];
+    vec3 diffuse_color = mat.diffuse;
+    if ((mat.flags & 1u) != 0u) {
+        diffuse_color = checker_color(pos);
+    }
+
+    vec3 tangent;
+    vec3 bitangent;
+    build_tangent_frame(normal, tangent, bitangent);
+
+    vec3 coeffs[16];
+    for (int i = 0; i < 16; ++i) {
+        coeffs[i] = vec3(0.0);
+    }
+
+    float weight = 2.0 * 3.14159265 / float(params.sh_samples);
+
+    for (uint s = 0u; s < params.sh_samples; ++s) {
+        float fi = float(s) + 0.5;
+        float n = float(params.sh_samples);
+        float z = 1.0 - fi / n;
+        float r = sqrt(max(0.0, 1.0 - z * z));
+        float theta = 2.0 * 3.14159265 * fi / 1.61803398875;
+        vec3 local_dir = normalize(vec3(r * cos(theta), r * sin(theta), z));
+        vec3 world_dir = normalize(local_dir.x * tangent + local_dir.y * bitangent + local_dir.z * normal);
+
+        vec3 incoming = -world_dir;
+        vec3 radiance = trace_path(offset_origin(pos, normal, incoming), incoming);
+        vec3 b = clamp(radiance, vec3(0.0), vec3(1.0)) - vec3(0.5);
+
+        for (int i = 0; i < 16; ++i) {
+            float y = sh_basis(i, world_dir);
+            coeffs[i] += b * y * weight;
+        }
+    }
+
+    vec3 sh_dc = coeffs[0] / SH_C0;
+
+    GaussianOut out_g;
+    out_g.pos = vec4(pos, 1.0);
+    out_g.normal = vec4(normal, 0.0);
+    out_g.sh_dc = vec4(sh_dc, 0.0);
+
+    // Pack planar format: R[15], G[15], B[15]
+    float rest[45];
+    int off = 0;
+    for (int i = 1; i < 16; ++i) { rest[off++] = coeffs[i].x; }
+    for (int i = 1; i < 16; ++i) { rest[off++] = coeffs[i].y; }
+    for (int i = 1; i < 16; ++i) { rest[off++] = coeffs[i].z; }
+
+    for (int i = 0; i < 12; ++i) {
+        vec4 v4 = vec4(0.0);
+        for (int k = 0; k < 4; ++k) {
+            int ri = i * 4 + k;
+            if (ri < 45) {
+                v4[k] = rest[ri];
+            }
+        }
+        out_g.sh_rest[i] = v4;
+    }
+
+    float opacity_p = (mat.albedo.w > 0.0) ? 0.15 : 0.98;
+    float opacity = log(opacity_p / (1.0 - opacity_p));
+
+    float tangent_sigma = max(params.splat_scale, 1e-6);
+    float normal_sigma = max(params.splat_scale * 0.3, 1e-6);
+    out_g.opacity_scale = vec4(opacity, log(tangent_sigma), log(tangent_sigma), log(normal_sigma));
+    out_g.rotation = quat_from_normal(normal);
+
+    gaussians[id] = out_g;
 }
 "#;
