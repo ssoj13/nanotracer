@@ -12,23 +12,23 @@ use super::ShCoeffs;
 // 3DGS implementation (graphdeco-inria/gaussian-splatting, utils/sh_utils.py).
 // Many viewers expect this exact convention; mixing SH conventions yields
 // psychedelic/incorrect colors.
-pub const SH_C0: f32 = 0.28209479177387814;
-const SH_C1: f32 = 0.4886025119029199;
+pub const SH_C0: f32 = 0.282_094_8;
+const SH_C1: f32 = 0.488_602_52;
 const SH_C2: [f32; 5] = [
-    1.0925484305920792,
-    -1.0925484305920792,
-    0.31539156525252005,
-    -1.0925484305920792,
-    0.5462742152960396,
+    1.092_548_5,
+    -1.092_548_5,
+    0.315_391_57,
+    -1.092_548_5,
+    0.546_274_24,
 ];
 const SH_C3: [f32; 7] = [
-    -0.5900435899266435,
-    2.890611442640554,
-    -0.4570457994644658,
-    0.3731763325901154,
-    -0.4570457994644658,
-    1.445305721320277,
-    -0.5900435899266435,
+    -0.590_043_6,
+    2.890_611_4,
+    -0.457_045_8,
+    0.373_176_34,
+    -0.457_045_8,
+    1.445_305_7,
+    -0.590_043_6,
 ];
 
 /// Evaluate real spherical harmonic basis function Y_l^m at direction (x, y, z)
@@ -147,8 +147,8 @@ pub fn fit_sh(samples: &[(Vec3, Vec3)], max_degree: u32) -> ShCoeffs {
 
     // Small Tikhonov regularization to avoid singular matrices for low sample counts.
     let lambda = 1e-4;
-    for i in 0..n_coeffs {
-        ata[i][i] += lambda;
+    for (i, row) in ata.iter_mut().enumerate().take(n_coeffs) {
+        row[i] += lambda;
     }
 
     for channel in 0..3 {
@@ -179,8 +179,8 @@ fn solve_linear_system<const N: usize>(
         // Find pivot
         let mut pivot_row = col;
         let mut pivot_val = a[col][col].abs();
-        for r in (col + 1)..n {
-            let v = a[r][col].abs();
+        for (r, row) in a.iter().enumerate().take(n).skip(col + 1) {
+            let v = row[col].abs();
             if v > pivot_val {
                 pivot_val = v;
                 pivot_row = r;
@@ -198,8 +198,8 @@ fn solve_linear_system<const N: usize>(
 
         // Normalize pivot row
         let pivot = a[col][col];
-        for c in col..n {
-            a[col][c] /= pivot;
+        for cell in a[col].iter_mut().take(n).skip(col) {
+            *cell /= pivot;
         }
         b[col] /= pivot;
 
@@ -212,6 +212,7 @@ fn solve_linear_system<const N: usize>(
             if factor.abs() < 1e-12 {
                 continue;
             }
+            #[allow(clippy::needless_range_loop)]
             for c in col..n {
                 a[r][c] -= factor * a[col][c];
             }
@@ -220,9 +221,7 @@ fn solve_linear_system<const N: usize>(
     }
 
     let mut x = [0.0f32; N];
-    for i in 0..n {
-        x[i] = b[i];
-    }
+    x[..n].copy_from_slice(&b[..n]);
     x
 }
 

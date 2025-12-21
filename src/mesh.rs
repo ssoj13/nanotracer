@@ -146,15 +146,14 @@ impl Mesh {
         let mut best_hit: Option<TriangleHit> = None;
         let mut best_t = f32::INFINITY;
 
-        let mut iter = bvh.traverse_iter(&mut ray, self.primitives.as_slice());
-        while let Some((prim, bvh_ray)) = iter.next() {
-            if let Some(hit) = self.intersect_triangle(origin, dir, prim.tri_index) {
-                if hit.t < best_t {
+        let iter = bvh.traverse_iter(&mut ray, self.primitives.as_slice());
+        for (prim, bvh_ray) in iter {
+            if let Some(hit) = self.intersect_triangle(origin, dir, prim.tri_index)
+                && hit.t < best_t {
                     best_t = hit.t;
                     best_hit = Some(hit);
                     bvh_ray.t = best_t;
                 }
-            }
         }
 
         best_hit

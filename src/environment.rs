@@ -1,12 +1,12 @@
 //! HDR environment map support for realistic lighting and reflections
 
-use crate::vec3::Vector3;
+use glam::Vec3;
 use std::f32::consts::PI;
 
 /// HDR environment map for realistic lighting
 pub struct EnvironmentMap {
     /// HDR pixel data in linear RGB
-    data: Vec<Vector3>,
+    data: Vec<Vec3>,
     /// Width of the environment map
     width: u32,
     /// Height of the environment map
@@ -28,13 +28,13 @@ impl EnvironmentMap {
             |resolution, _| {
                 let width = resolution.width() as u32;
                 let height = resolution.height() as u32;
-                vec![Vector3::ZERO; (width * height) as usize]
+                vec![Vec3::ZERO; (width * height) as usize]
             },
             |pixel_vector, position, (r, g, b, _a): (f32, f32, f32, f32)| {
                 let width = position.width();
                 let index = position.y() * width + position.x();
                 if index < pixel_vector.len() {
-                    pixel_vector[index] = Vector3::new(r, g, b);
+                    pixel_vector[index] = Vec3::new(r, g, b);
                 }
             },
         )?;
@@ -78,7 +78,7 @@ impl EnvironmentMap {
     }
 
     /// Convert 3D direction vector to UV coordinates (equirectangular projection)
-    fn direction_to_uv(&self, dir: Vector3) -> (f32, f32) {
+    fn direction_to_uv(&self, dir: Vec3) -> (f32, f32) {
         // Normalize direction vector
         let dir = dir.normalize();
 
@@ -94,12 +94,12 @@ impl EnvironmentMap {
     }
 
     /// Sample environment map with bilinear filtering and tone mapping
-    pub fn sample(&self, direction: Vector3) -> Vector3 {
+    pub fn sample(&self, direction: Vec3) -> Vec3 {
         // Use procedural sky if enabled
         if self.use_sky {
             let dir = direction.normalize();
-            let sky_blue = Vector3::new(0.5, 0.7, 1.0);
-            let horizon = Vector3::new(1.0, 0.9, 0.7);
+            let sky_blue = Vec3::new(0.5, 0.7, 1.0);
+            let horizon = Vec3::new(1.0, 0.9, 0.7);
             let t = (dir.y + 1.0) * 0.5; // Blend from horizon to sky
             return sky_blue * t + horizon * (1.0 - t);
         }
@@ -116,12 +116,12 @@ impl EnvironmentMap {
     }
 
     /// Simple tone mapping using Reinhard operator with exposure adjustment
-    fn tone_map(&self, hdr_color: Vector3) -> Vector3 {
+    fn tone_map(&self, hdr_color: Vec3) -> Vec3 {
         // Apply user-specified exposure adjustment
         let exposed = hdr_color * self.exposure;
 
         // Reinhard tone mapping: color / (1 + color)
-        Vector3::new(
+        Vec3::new(
             exposed.x / (1.0 + exposed.x),
             exposed.y / (1.0 + exposed.y),
             exposed.z / (1.0 + exposed.z),
@@ -129,11 +129,11 @@ impl EnvironmentMap {
     }
 
     /// Get pixel at coordinates with bounds checking
-    fn get_pixel(&self, x: u32, y: u32) -> Vector3 {
+    fn get_pixel(&self, x: u32, y: u32) -> Vec3 {
         let x = x.min(self.width - 1);
         let y = y.min(self.height - 1);
         let index = (y * self.width + x) as usize;
-        self.data.get(index).copied().unwrap_or(Vector3::ZERO)
+        self.data.get(index).copied().unwrap_or(Vec3::ZERO)
     }
 
     /// Get width of environment map
@@ -148,4 +148,4 @@ impl EnvironmentMap {
 }
 
 /// Default sky color fallback
-pub const DEFAULT_SKY_COLOR: Vector3 = Vector3::new(0.2, 0.7, 0.8);
+pub const DEFAULT_SKY_COLOR: Vec3 = Vec3::new(0.2, 0.7, 0.8);

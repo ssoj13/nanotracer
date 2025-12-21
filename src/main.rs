@@ -11,7 +11,7 @@ use nanotracer_rs::material::{
     GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MIRROR, RED_RUBBER,
 };
 use nanotracer_rs::mesh::{Mesh, cube, pyramid, torus};
-use nanotracer_rs::renderer::cast_ray_with_params;
+use nanotracer_rs::renderer::{RayConfig, cast_ray_cfg};
 use nanotracer_rs::scene::{Light, Scene};
 use nanotracer_rs::splat::{SplatConfig, ply::write_ply, sampler::generate_splats};
 use nanotracer_rs::utils::save_image;
@@ -200,46 +200,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position: Vec3::new(30.0, 20.0, 30.0),
     });
 
-    // Display rendering statistics
-    if args.splat_output.is_none() { // Only for image rendering mode
-        let tile_size = if args.tile_size == 0 {
-            // Auto-select tile size based on CPU cores
-            let cpu_cores = num_cpus::get();
-            match cpu_cores {
-                0..=2 => 32,
-                3..=4 => 24,
-                5..=8 => 16,
-                9..=16 => 12,
-                _ => 8,  // More than 16 cores
-            }
-        } else {
-            args.tile_size.clamp(1, WIDTH.min(HEIGHT))
-        };
+    use std::time::Instant;
 
-        let tiles_count = if tile_size > 0 {
-            ((WIDTH + tile_size - 1) / tile_size) * ((HEIGHT + tile_size - 1) / tile_size)
-        } else {
-            1  // fallback value
-        };
-
-        println!("┌─────────────────────────────────────────┐");
-        println!("│            RENDERING STATISTICS         │");
-        println!("├─────────────────────────────────────────┤");
-        println!("│ Resolution:      {:>6} x {:<6}        │", WIDTH, HEIGHT);
-        println!("│ Objects:         {:>6}                  │", args.object_count);
-        println!("│ Max depth:       {:>6}                  │", args.max_depth);
-        println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
-        println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
-        println!("│ AA samples:      {:>6}x{:<5}            │", args.aa_samples, args.aa_samples);
-        println!("│ Tile size:       {:>6}                  │", tile_size);
-        println!("│ Tiles count:     {:>6}                  │", tiles_count);
-        println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
-        println!("│ Adaptive AA:     {:>6}                  │", if args.adaptive_aa { "YES" } else { "NO" });
-        println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
-        println!("│ Output file:     {:>6}                  │", "output.png");
-        println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
-        println!("└─────────────────────────────────────────┘");
-    }
+    // Start timing for both modes
+    let start_time = Instant::now();
 
     // Splat generation mode
     if let Some(splat_path) = &args.splat_output {
@@ -277,15 +241,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         write_ply(path, &gaussians)?;
 
         let file_size = std::fs::metadata(path)?.len();
+        let elapsed = start_time.elapsed();
         println!("Splat generation complete!");
         println!("  Output: {}", splat_path);
         println!("  Gaussians: {}", gaussians.len());
         println!("  File size: {:.2} MB", file_size as f64 / 1_000_000.0);
+        println!("  Time elapsed: {:.2?}", elapsed);
 
         return Ok(());
     }
 
-    // Render mode
+    // Display rendering statistics
+    let tile_size = auto_tile_size(args.tile_size, WIDTH.min(HEIGHT));
+    let tiles_count = WIDTH.div_ceil(tile_size) * HEIGHT.div_ceil(tile_size);
+    let ray_cfg = RayConfig::new(args.max_depth, args.reflection_depth, args.refraction_depth);
+
+    println!("┌─────────────────────────────────────────┐");
+    println!("│            RENDERING STATISTICS         │");
+    println!("├─────────────────────────────────────────┤");
+    println!("│ Resolution:      {:>6} x {:<6}        │", WIDTH, HEIGHT);
+    println!("│ Objects:         {:>6}                  │", args.object_count);
+    println!("│ Max depth:       {:>6}                  │", args.max_depth);
+    println!("│ Reflection:      {:>6}                  │", args.reflection_depth);
+    println!("│ Refraction:      {:>6}                  │", args.refraction_depth);
+    println!("│ AA samples:      {:>6}x{:<5}            │", args.aa_samples, args.aa_samples);
+    println!("│ Tile size:       {:>6}                  │", tile_size);
+    println!("│ Tiles count:     {:>6}                  │", tiles_count);
+    println!("│ CPU cores:       {:>6}                  │", num_cpus::get());
+    println!("│ Adaptive AA:     {:>6}                  │", if args.adaptive_aa { "YES" } else { "NO" });
+    println!("│ Environment:     {:>6}                  │", if scene.environment.is_some() { "YES" } else { "NO" });
+    println!("│ Output file:     {:>6}                  │", "output.png");
+    println!("│ Tonemapping:     {:>6}                  │", if args.tonemap { "YES" } else { "NO" });
+    println!("└─────────────────────────────────────────┘");
+
     let mut framebuffer = vec![Vec3::ZERO; WIDTH * HEIGHT];
 
     let aa_samples = args.aa_samples;
@@ -295,20 +283,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let half_height = HEIGHT as f32 * 0.5;
     let fov_scale = (FOV / 2.0).tan();
     let dir_z = -(HEIGHT as f32) / (2.0 * fov_scale);
-
-    let tile_size = if args.tile_size == 0 {
-        // Auto-select tile size based on CPU cores
-        let cpu_cores = num_cpus::get();
-        match cpu_cores {
-            0..=2 => 32,
-            3..=4 => 24,
-            5..=8 => 16,
-            9..=16 => 12,
-            _ => 8,  // More than 16 cores
-        }
-    } else {
-        args.tile_size.clamp(1, WIDTH.min(HEIGHT))
-    };
 
     let tiles: Vec<Tile> = (0..HEIGHT)
         .step_by(tile_size)
@@ -348,41 +322,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for x in tile.x_start..(tile.x_start + tile.width) {
                 let mut color = Vec3::ZERO;
 
-                // Use adaptive sampling if enabled
-                if args.adaptive_aa && aa_samples > 1 {
-                    color = adaptive_sample_pixel(
-                        &scene,
-                        x, y,
-                        aa_samples,
-                        half_width, half_height, dir_z,
-                        args.max_depth,
-                        args.reflection_depth,
-                        args.refraction_depth
-                    );
-                } else {
-                    // Use Quasi-Monte Carlo sampling instead of regular grid
-                    for sample in 0..(aa_samples * aa_samples) {
-                        // Generate Halton sequence for better distribution
-                        let jitter_x = halton_sequence(sample, 2); // base 2
-                        let jitter_y = halton_sequence(sample, 3); // base 3
+                // Quasi-Monte Carlo sampling with Halton sequence
+                for sample in 0..(aa_samples * aa_samples) {
+                    let jitter_x = halton_sequence(sample, 2);
+                    let jitter_y = halton_sequence(sample, 3);
 
-                        let dir_x = (x as f32 + jitter_x) - half_width;
-                        let dir_y = -(y as f32 + jitter_y) + half_height;
-                        let direction = Vec3::new(dir_x, dir_y, dir_z).normalize();
-                        color += cast_ray_with_params(
-                            &scene,
-                            Vec3::ZERO,
-                            direction,
-                            0,
-                            0,
-                            0,
-                            args.max_depth,
-                            args.reflection_depth,
-                            args.refraction_depth,
-                        );
-                    }
-                    color *= inv_spp;
+                    let dir_x = (x as f32 + jitter_x) - half_width;
+                    let dir_y = -(y as f32 + jitter_y) + half_height;
+                    let direction = Vec3::new(dir_x, dir_y, dir_z).normalize();
+                    
+                    color += cast_ray_cfg(&scene, Vec3::ZERO, direction, 0, 0, 0, &ray_cfg);
                 }
+                color *= inv_spp;
 
                 let idx = row_offset + x;
                 unsafe {
@@ -395,6 +346,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     pb.finish_with_message("Rendering complete");
 
+    let elapsed = start_time.elapsed();
+    println!("Render complete! Time elapsed: {:.2?}", elapsed);
+
     println!("Saving image...");
     save_image(
         &framebuffer,
@@ -404,7 +358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.tonemap,
     )?;
 
-    println!("Render complete! Image saved as output.png");
+    println!("Image saved as output.png");
     Ok(())
 }
 
@@ -559,7 +513,24 @@ fn add_random_objects(
     }
 }
 
+/// Auto-select optimal tile size based on CPU cores
+#[inline]
+fn auto_tile_size(requested: usize, max_size: usize) -> usize {
+    if requested == 0 {
+        match num_cpus::get() {
+            0..=2 => 32,
+            3..=4 => 24,
+            5..=8 => 16,
+            9..=16 => 12,
+            _ => 8,
+        }
+    } else {
+        requested.clamp(1, max_size)
+    }
+}
+
 /// Generate Halton sequence for Quasi-Monte Carlo sampling
+#[inline]
 fn halton_sequence(index: u32, base: u32) -> f32 {
     let mut result = 0.0;
     let mut fraction = 1.0 / base as f32;
@@ -572,45 +543,4 @@ fn halton_sequence(index: u32, base: u32) -> f32 {
     }
 
     result
-}
-
-/// Adaptive sampling based on pixel contrast
-fn adaptive_sample_pixel(
-    scene: &Scene,
-    x: usize,
-    y: usize,
-    max_aa_samples: u32,
-    half_width: f32,
-    half_height: f32,
-    dir_z: f32,
-    max_depth: i32,
-    reflection_depth: i32,
-    refraction_depth: i32,
-) -> Vec3 {
-    // Calculate the number of samples based on contrast with neighbors
-    let spp = max_aa_samples * max_aa_samples;
-    let inv_spp = 1.0 / spp as f32;
-
-    let mut color = Vec3::ZERO;
-    for sample in 0..spp {
-        let jitter_x = halton_sequence(sample, 2);
-        let jitter_y = halton_sequence(sample, 3);
-
-        let dir_x = (x as f32 + jitter_x) - half_width;
-        let dir_y = -(y as f32 + jitter_y) + half_height;
-        let direction = Vec3::new(dir_x, dir_y, dir_z).normalize();
-        color += cast_ray_with_params(
-            scene,
-            Vec3::ZERO,
-            direction,
-            0,
-            0,
-            0,
-            max_depth,
-            reflection_depth,
-            refraction_depth,
-        );
-    }
-
-    color * inv_spp
 }

@@ -8,7 +8,7 @@ use crate::color::apply_tonemap_srgb;
 use crate::geometry::{Geometry, Object};
 use crate::material::{Material, checkerboard_material};
 use crate::mesh::Mesh;
-use crate::renderer::{cast_ray_with_params, reflect, refract};
+use crate::renderer::{RayConfig, cast_ray_cfg, offset_origin, reflect, refract};
 use crate::scene::Scene;
 
 use super::sh::fibonacci_hemisphere;
@@ -257,25 +257,18 @@ fn trace_incoming(
 ) -> Vec3 {
     let incoming_dir = -outgoing_dir.normalize();
     let material = &sample.material;
-
-    // Fast path for materials without reflection/refraction
-    let use_fast_diffuse =
-        material.albedo[2] <= 0.0 && material.albedo[3] <= 0.0;
+    let is_diffuse_only = material.albedo[2] <= 0.0 && material.albedo[3] <= 0.0;
 
     let mut diffuse_intensity = 0.0;
     let mut specular_intensity = 0.0;
 
-    if !use_fast_diffuse || scene.lights.len() > 0 {
+    // Direct lighting
+    if !is_diffuse_only || !scene.lights.is_empty() {
         for light in &scene.lights {
             let light_dir = (light.position - sample.pos).normalize();
-
-            // Shadow test - offset to avoid self-intersection
-            let shadow_orig = if light_dir.dot(sample.normal) < 0.0 {
-                sample.pos - sample.normal * 1e-3
-            } else {
-                sample.pos + sample.normal * 1e-3
-            };
+            let shadow_orig = offset_origin(sample.pos, sample.normal, light_dir);
             let shadow_hit = scene.intersect(shadow_orig, light_dir);
+            
             if shadow_hit.hit
                 && (shadow_hit.point - sample.pos).length() < (light.position - sample.pos).length()
             {
@@ -284,70 +277,37 @@ fn trace_incoming(
 
             diffuse_intensity += light_dir.dot(sample.normal).max(0.0);
 
-            if !use_fast_diffuse {
-                let reflect_dir = reflect(-light_dir, sample.normal);
-                specular_intensity += (-reflect_dir.dot(incoming_dir))
+            if !is_diffuse_only {
+                let refl_dir = reflect(-light_dir, sample.normal);
+                specular_intensity += (-refl_dir.dot(incoming_dir))
                     .max(0.0)
                     .powf(material.specular_exponent);
             }
         }
     }
 
-    let mut color = material.diffuse_color;
-    color *= diffuse_intensity * material.albedo[0];
+    let mut color = material.diffuse_color * diffuse_intensity * material.albedo[0];
 
-    if !use_fast_diffuse {
-        let specular_contribution = Vec3::ONE * specular_intensity * material.albedo[1];
-        color += specular_contribution;
+    if !is_diffuse_only {
+        color += Vec3::ONE * specular_intensity * material.albedo[1];
 
-        let mut reflect_color = Vec3::ZERO;
-        let mut refract_color = Vec3::ZERO;
+        let ray_cfg = RayConfig::new(config.max_depth, config.reflection_depth, config.refraction_depth);
 
+        // Reflection
         if material.albedo[2] > 0.0 {
-            let reflect_dir = reflect(incoming_dir, sample.normal);
-            let reflect_orig = if reflect_dir.dot(sample.normal) < 0.0 {
-                sample.pos - sample.normal * 1e-3
-            } else {
-                sample.pos + sample.normal * 1e-3
-            };
-            reflect_color = cast_ray_with_params(
-                scene,
-                reflect_orig,
-                reflect_dir,
-                0,
-                0,
-                0,
-                config.max_depth,
-                config.reflection_depth,
-                config.refraction_depth,
-            );
+            let refl_dir = reflect(incoming_dir, sample.normal);
+            let refl_orig = offset_origin(sample.pos, sample.normal, refl_dir);
+            let refl_color = cast_ray_cfg(scene, refl_orig, refl_dir, 0, 0, 0, &ray_cfg);
+            color += refl_color * material.albedo[2];
         }
 
+        // Refraction
         if material.albedo[3] > 0.0 {
-            let refract_dir = refract(incoming_dir, sample.normal, material.refractive_index, 1.0);
-            let refract_orig = if refract_dir.dot(sample.normal) < 0.0 {
-                sample.pos - sample.normal * 1e-3
-            } else {
-                sample.pos + sample.normal * 1e-3
-            };
-            refract_color = cast_ray_with_params(
-                scene,
-                refract_orig,
-                refract_dir,
-                0,
-                0,
-                0,
-                config.max_depth,
-                config.reflection_depth,
-                config.refraction_depth,
-            );
+            let refr_dir = refract(incoming_dir, sample.normal, material.refractive_index, 1.0);
+            let refr_orig = offset_origin(sample.pos, sample.normal, refr_dir);
+            let refr_color = cast_ray_cfg(scene, refr_orig, refr_dir, 0, 0, 0, &ray_cfg);
+            color += refr_color * material.albedo[3];
         }
-
-        let reflect_contribution = reflect_color * material.albedo[2];
-        color += reflect_contribution;
-
-        let refract_contribution = refract_color * material.albedo[3];
-        color += refract_contribution;
     }
 
     color

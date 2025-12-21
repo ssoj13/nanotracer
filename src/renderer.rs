@@ -13,6 +13,40 @@ pub const MAX_REFLECTION_DEPTH: i32 = 4;
 /// Maximum depth for refraction rays
 pub const MAX_REFRACTION_DEPTH: i32 = 10;
 
+/// Ray tracing configuration (reduces argument count)
+#[derive(Debug, Clone, Copy)]
+pub struct RayConfig {
+    pub max_depth: i32,
+    pub max_reflection: i32,
+    pub max_refraction: i32,
+}
+
+impl Default for RayConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: MAX_DEPTH,
+            max_reflection: MAX_REFLECTION_DEPTH,
+            max_refraction: MAX_REFRACTION_DEPTH,
+        }
+    }
+}
+
+impl RayConfig {
+    pub fn new(max_depth: i32, max_reflection: i32, max_refraction: i32) -> Self {
+        Self { max_depth, max_reflection, max_refraction }
+    }
+}
+
+/// Offset ray origin to avoid self-intersection
+#[inline]
+pub fn offset_origin(point: Vec3, normal: Vec3, dir: Vec3) -> Vec3 {
+    if dir.dot(normal) < 0.0 {
+        point - normal * 1e-3
+    } else {
+        point + normal * 1e-3
+    }
+}
+
 /// Reflect a ray direction I about normal N
 pub fn reflect(i: Vec3, n: Vec3) -> Vec3 {
     i - n * 2.0 * i.dot(n)
@@ -37,20 +71,25 @@ pub fn refract(i: Vec3, n: Vec3, eta_t: f32, eta_i: f32) -> Vec3 {
 
 /// Cast a ray into the scene and return the computed color
 pub fn cast_ray(scene: &Scene, orig: Vec3, dir: Vec3, depth: i32) -> Vec3 {
-    cast_ray_with_separate_depths(
-        scene,
-        orig,
-        dir,
-        depth,
-        0,
-        0,
-        MAX_DEPTH,
-        MAX_REFLECTION_DEPTH,
-        MAX_REFRACTION_DEPTH,
-    )
+    cast_ray_cfg(scene, orig, dir, depth, 0, 0, &RayConfig::default())
 }
 
-/// Cast a ray with configurable depth parameters
+/// Cast a ray with RayConfig (preferred API)
+#[inline]
+pub fn cast_ray_cfg(
+    scene: &Scene,
+    orig: Vec3,
+    dir: Vec3,
+    depth: i32,
+    refl_depth: i32,
+    refr_depth: i32,
+    cfg: &RayConfig,
+) -> Vec3 {
+    cast_ray_inner(scene, orig, dir, depth, refl_depth, refr_depth, cfg)
+}
+
+/// Cast a ray with configurable depth parameters (legacy API)
+#[allow(clippy::too_many_arguments)]
 pub fn cast_ray_with_params(
     scene: &Scene,
     orig: Vec3,
@@ -62,32 +101,21 @@ pub fn cast_ray_with_params(
     max_reflection_depth: i32,
     max_refraction_depth: i32,
 ) -> Vec3 {
-    cast_ray_with_separate_depths(
-        scene,
-        orig,
-        dir,
-        depth,
-        reflection_depth,
-        refraction_depth,
-        max_depth,
-        max_reflection_depth,
-        max_refraction_depth,
-    )
+    let cfg = RayConfig::new(max_depth, max_reflection_depth, max_refraction_depth);
+    cast_ray_inner(scene, orig, dir, depth, reflection_depth, refraction_depth, &cfg)
 }
 
-/// Cast a ray with separate tracking for reflection and refraction depths
-fn cast_ray_with_separate_depths(
+/// Core ray casting implementation
+#[inline]
+fn cast_ray_inner(
     scene: &Scene,
     orig: Vec3,
     dir: Vec3,
     depth: i32,
-    reflection_depth: i32,
-    refraction_depth: i32,
-    max_depth: i32,
-    max_reflection_depth: i32,
-    max_refraction_depth: i32,
+    refl_depth: i32,
+    refr_depth: i32,
+    cfg: &RayConfig,
 ) -> Vec3 {
-    // Early check for diffuse-only materials to use optimized path
     let intersection = scene.intersect(orig, dir);
 
     if !intersection.hit {
@@ -95,23 +123,16 @@ fn cast_ray_with_separate_depths(
     }
 
     let material = intersection.material;
-    let use_fast_diffuse =
-        material.albedo[1] <= 0.0 && material.albedo[2] <= 0.0 && material.albedo[3] <= 0.0;
+    let is_diffuse_only = material.albedo[1] <= 0.0 
+        && material.albedo[2] <= 0.0 
+        && material.albedo[3] <= 0.0;
 
-    // Use fast path for diffuse-only materials (skip on primary rays for accuracy)
-    if use_fast_diffuse && depth > 0 {
-        return cast_ray_diffuse_only(
-            scene,
-            orig,
-            dir,
-            depth,
-            max_depth,
-            max_reflection_depth,
-            max_refraction_depth,
-        );
+    // Fast path for diffuse-only materials (skip on primary rays)
+    if is_diffuse_only && depth > 0 {
+        return cast_ray_diffuse(scene, orig, dir, depth, cfg);
     }
 
-    if depth > max_depth {
+    if depth > cfg.max_depth {
         return scene.sample_environment(dir);
     }
 
@@ -119,105 +140,91 @@ fn cast_ray_with_separate_depths(
     let normal = intersection.normal;
 
     let rr_weight = match russian_roulette(depth, &material) {
-        Some(weight) => weight,
+        Some(w) => w,
         None => return Vec3::ZERO,
     };
 
     let mut reflect_color = Vec3::ZERO;
     let mut refract_color = Vec3::ZERO;
 
-    if !use_fast_diffuse {
-        let reflect_dir = reflect(dir, normal);
-        // Offset origin along normal to avoid self-intersection
-        let reflect_orig = if reflect_dir.dot(normal) < 0.0 {
-            point - normal * 1e-3
-        } else {
-            point + normal * 1e-3
-        };
-        if material.albedo[2] > 0.0 && reflection_depth < max_reflection_depth {
-            reflect_color = cast_ray_with_separate_depths(
-                scene,
-                reflect_orig,
-                reflect_dir,
-                depth + 1,
-                reflection_depth + 1,
-                refraction_depth,
-                max_depth,
-                max_reflection_depth,
-                max_refraction_depth,
+    if !is_diffuse_only {
+        // Reflection
+        if material.albedo[2] > 0.0 && refl_depth < cfg.max_reflection {
+            let refl_dir = reflect(dir, normal);
+            let refl_orig = offset_origin(point, normal, refl_dir);
+            reflect_color = cast_ray_inner(
+                scene, refl_orig, refl_dir,
+                depth + 1, refl_depth + 1, refr_depth, cfg,
             );
         }
 
-        let refract_dir = refract(dir, normal, material.refractive_index, 1.0);
-        // Offset origin - inside surface for refraction
-        let refract_orig = if refract_dir.dot(normal) < 0.0 {
-            point - normal * 1e-3
-        } else {
-            point + normal * 1e-3
-        };
-        if material.albedo[3] > 0.0 && refraction_depth < max_refraction_depth {
-            refract_color = cast_ray_with_separate_depths(
-                scene,
-                refract_orig,
-                refract_dir,
-                depth + 1,
-                reflection_depth,
-                refraction_depth + 1,
-                max_depth,
-                max_reflection_depth,
-                max_refraction_depth,
+        // Refraction
+        if material.albedo[3] > 0.0 && refr_depth < cfg.max_refraction {
+            let refr_dir = refract(dir, normal, material.refractive_index, 1.0);
+            let refr_orig = offset_origin(point, normal, refr_dir);
+            refract_color = cast_ray_inner(
+                scene, refr_orig, refr_dir,
+                depth + 1, refl_depth, refr_depth + 1, cfg,
             );
         }
     }
 
-    let mut diffuse_light_intensity = 0.0;
-    let mut specular_light_intensity = 0.0;
+    // Lighting
+    let (diffuse_intensity, specular_intensity) = 
+        compute_lighting(scene, point, normal, dir, &material, is_diffuse_only);
 
-    let light_count = scene.lights.len();
-    if light_count > 0 {
-        let light_weight = light_count as f32;
-        let light_idx = fastrand::usize(..light_count);
-        let light = &scene.lights[light_idx];
-        let light_dir = (light.position - point).normalize();
-
-        // Shadow check - offset origin to avoid self-shadowing
-        let shadow_orig = if light_dir.dot(normal) < 0.0 {
-            point - normal * 1e-3
-        } else {
-            point + normal * 1e-3
-        };
-        let shadow_intersection = scene.intersect(shadow_orig, light_dir);
-        if shadow_intersection.hit
-            && (shadow_intersection.point - point).length() < (light.position - point).length()
-        {
-            diffuse_light_intensity = 0.0;
-            specular_light_intensity = 0.0;
-        } else {
-            diffuse_light_intensity = light_dir.dot(normal).max(0.0) * light_weight;
-            if !use_fast_diffuse {
-                specular_light_intensity = (-reflect(-light_dir, normal))
-                    .dot(dir)
-                    .max(0.0)
-                    .powf(material.specular_exponent)
-                    * light_weight;
-            }
-        }
-    }
-
-    // Compute final color with optimized operations
-    let mut color = material.diffuse_color;
-    color *= diffuse_light_intensity * material.albedo[0];
-
-    let specular_contribution = Vec3::ONE * specular_light_intensity * material.albedo[1];
-    color += specular_contribution;
-
-    let reflect_contribution = reflect_color * material.albedo[2];
-    color += reflect_contribution;
-
-    let refract_contribution = refract_color * material.albedo[3];
-    color += refract_contribution;
+    // Final color composition
+    let mut color = material.diffuse_color * diffuse_intensity * material.albedo[0];
+    color += Vec3::ONE * specular_intensity * material.albedo[1];
+    color += reflect_color * material.albedo[2];
+    color += refract_color * material.albedo[3];
 
     color * rr_weight
+}
+
+/// Compute direct lighting at a point
+#[inline]
+fn compute_lighting(
+    scene: &Scene,
+    point: Vec3,
+    normal: Vec3,
+    view_dir: Vec3,
+    material: &Material,
+    diffuse_only: bool,
+) -> (f32, f32) {
+    let light_count = scene.lights.len();
+    if light_count == 0 {
+        return (0.0, 0.0);
+    }
+
+    let light_weight = light_count as f32;
+    let light_idx = fastrand::usize(..light_count);
+    let light = &scene.lights[light_idx];
+    let light_dir = (light.position - point).normalize();
+
+    // Shadow test
+    let shadow_orig = offset_origin(point, normal, light_dir);
+    let shadow_hit = scene.intersect(shadow_orig, light_dir);
+    
+    if shadow_hit.hit 
+        && (shadow_hit.point - point).length() < (light.position - point).length() 
+    {
+        return (0.0, 0.0);
+    }
+
+    let diffuse = light_dir.dot(normal).max(0.0) * light_weight;
+    
+    let specular = if diffuse_only {
+        0.0
+    } else {
+        (-reflect(-light_dir, normal))
+            .dot(view_dir)
+            .max(0.0)
+            .powf(material.specular_exponent)
+            * light_weight
+    };
+
+    (diffuse, specular)
 }
 
 fn russian_roulette(depth: i32, material: &Material) -> Option<f32> {
@@ -243,21 +250,19 @@ fn russian_roulette(depth: i32, material: &Material) -> Option<f32> {
 }
 
 /// Fast ray casting for diffuse-only materials (no reflection/refraction)
-fn cast_ray_diffuse_only(
+#[inline]
+fn cast_ray_diffuse(
     scene: &Scene,
     orig: Vec3,
     dir: Vec3,
     depth: i32,
-    max_depth: i32,
-    _max_reflection_depth: i32,
-    _max_refraction_depth: i32,
+    cfg: &RayConfig,
 ) -> Vec3 {
-    if depth > max_depth {
+    if depth > cfg.max_depth {
         return scene.sample_environment(dir);
     }
 
     let intersection = scene.intersect(orig, dir);
-
     if !intersection.hit {
         return scene.sample_environment(dir);
     }
@@ -267,34 +272,10 @@ fn cast_ray_diffuse_only(
     let material = intersection.material;
 
     let rr_weight = match russian_roulette(depth, &material) {
-        Some(weight) => weight,
+        Some(w) => w,
         None => return Vec3::ZERO,
     };
 
-    // Only compute diffuse lighting for materials without reflection/refraction
-    let mut diffuse_light_intensity = 0.0;
-
-    let light_count = scene.lights.len();
-    if light_count > 0 {
-        let light_weight = light_count as f32;
-        let light_idx = fastrand::usize(..light_count);
-        let light = &scene.lights[light_idx];
-        let light_dir = (light.position - point).normalize();
-
-        // Shadow check - offset origin to avoid self-shadowing
-        let shadow_orig = if light_dir.dot(normal) < 0.0 {
-            point - normal * 1e-3
-        } else {
-            point + normal * 1e-3
-        };
-        let shadow_intersection = scene.intersect(shadow_orig, light_dir);
-        if !shadow_intersection.hit
-            || (shadow_intersection.point - point).length() >= (light.position - point).length()
-        {
-            diffuse_light_intensity = light_dir.dot(normal).max(0.0) * light_weight;
-        }
-    }
-
-    let color = material.diffuse_color * diffuse_light_intensity * material.albedo[0];
-    color * rr_weight
+    let (diffuse_intensity, _) = compute_lighting(scene, point, normal, dir, &material, true);
+    material.diffuse_color * diffuse_intensity * material.albedo[0] * rr_weight
 }

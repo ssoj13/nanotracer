@@ -1,11 +1,13 @@
 //! Utility functions for the raytracer
 
-use crate::color::apply_tonemap_srgb;
-use crate::vec3::Vector3;
+use glam::Vec3;
 use image::{ImageBuffer, Rgb};
 
-/// Convert a Vector3 color to a clamped RGB pixel value
-pub fn vec3_to_rgb(color: Vector3, tonemap: bool) -> Rgb<u8> {
+use crate::color::apply_tonemap_srgb;
+
+/// Convert a Vec3 color to a clamped RGB pixel value
+#[inline]
+pub fn vec3_to_rgb(color: Vec3, tonemap: bool) -> Rgb<u8> {
     let srgb = apply_tonemap_srgb(color, tonemap);
     Rgb([
         (255.0 * srgb.x.clamp(0.0, 1.0)) as u8,
@@ -16,7 +18,7 @@ pub fn vec3_to_rgb(color: Vector3, tonemap: bool) -> Rgb<u8> {
 
 /// Save framebuffer as PNG image
 pub fn save_image(
-    framebuffer: &[Vector3],
+    framebuffer: &[Vec3],
     width: u32,
     height: u32,
     filename: &str,

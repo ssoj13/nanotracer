@@ -148,13 +148,12 @@ impl Scene {
                         for proxy_idx in node.start..node.end {
                             let proxy = &scene_bvh.proxies[proxy_idx];
                             let object = &self.objects[proxy.index];
-                            if let Some(hit) = object.geometry.intersect(orig, dir) {
-                                if hit.t < best_t {
+                            if let Some(hit) = object.geometry.intersect(orig, dir)
+                                && hit.t < best_t {
                                     best_t = hit.t;
                                     result = Intersection::from_hit(&hit, object.material);
                                     ray.t = best_t;
                                 }
-                            }
                         }
                     } else {
                         if node.right >= 0 {
@@ -168,24 +167,21 @@ impl Scene {
             }
         } else {
             for object in &self.objects {
-                if let Some(hit) = object.geometry.intersect(orig, dir) {
-                    if hit.t < best_t {
+                if let Some(hit) = object.geometry.intersect(orig, dir)
+                    && hit.t < best_t {
                         best_t = hit.t;
                         result = Intersection::from_hit(&hit, object.material);
                     }
-                }
             }
         }
 
         // Check checkerboard plane (y = -4)
-        if self.checkerboard_enabled {
-            if let Some((t, point, material)) = self.intersect_checkerboard(orig, dir) {
-                if t < best_t {
+        if self.checkerboard_enabled
+            && let Some((t, point, material)) = self.intersect_checkerboard(orig, dir)
+                && t < best_t {
                     best_t = t;
                     result = Intersection::new(true, point, Vec3::Y, material);
                 }
-            }
-        }
 
         result.hit = best_t < 1000.0;
         result

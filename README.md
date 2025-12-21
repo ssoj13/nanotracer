@@ -1,267 +1,122 @@
-# NanoTracer Rust
+# NanoTracer-RS
 
-A port and extension of https://github.com/ssloy/tinyraytracer by Dmitry V. Sokolov.
-Studio.exr file is taken from https://polyhaven.com/hdris.
+High-performance path tracer in Rust with **Gaussian Splatting (3DGS) export**.
 
-A high-performance raytracer implementation in Rust, featuring reflection, refraction, and configurable ray tracing depths. This is a Rust port of the classic tinyraytracer project with modern improvements and parallelization.
+Based on [tinyraytracer](https://github.com/ssloy/tinyraytracer) by Dmitry V. Sokolov.
 
 ![Screenshot](data/splat.jpg)
 
 ## Features
 
-- **Ray-sphere intersection** with multiple materials
-- **Reflection and refraction** with separate depth controls
-- **Phong shading model** with diffuse and specular lighting
-- **Parallel rendering** using Rayon for multi-core performance
-- **Configurable depth limits** via command line arguments
-- **Material system** supporting ivory, glass, rubber, and mirror surfaces
-- **Checkerboard ground plane** for visual reference
-- **Gaussian splat export (3DGS PLY)** with view-independent SH0 colors
-- **Mesh primitives** (cube, pyramid, torus) with BVH-accelerated ray intersection
+- **Path tracing** with reflection, refraction, soft shadows
+- **Parallel rendering** via Rayon (scales to all CPU cores)
+- **SIMD optimization** with `wide` crate for vectorized ray casting
+- **Mesh primitives** (cube, pyramid, torus) with BVH acceleration
+- **HDR environment maps** (.exr) or procedural sky
+- **Adaptive anti-aliasing** with Halton quasi-Monte Carlo sampling
+- **Gaussian splat export** to 3DGS-compatible PLY format
 
-## Architecture
+## Quick Start
 
-### Core Components
+```bash
+cargo build --release
 
-```
-├── main.rs           # Scene setup and rendering loop
-├── lib.rs            # Module declarations
-├── vec3.rs           # Vector math using glam crate
-├── material.rs       # Material definitions and presets
-├── geometry.rs       # Sphere primitive and ray-sphere intersection
-├── scene.rs          # Scene management and ray intersection
-├── renderer.rs       # Ray casting and color computation
-└── utils.rs          # Image saving utilities
-```
+# Basic render
+cargo run --release
 
-### Data Flow
+# High quality with 4x AA and procedural sky
+cargo run --release -- -a 4 --sky
 
-1. **Scene Setup** (`main.rs`)
-   - Creates spheres with materials (ivory, glass, rubber, mirror)
-   - Defines light sources
-   - Parses command line arguments for depth limits
+# HDR environment lighting
+cargo run --release -- -e data/studio.exr -x 0.15
 
-2. **Ray Generation** (`main.rs`)
-   - For each pixel, calculates ray direction from camera
-   - Calls `cast_ray_with_params()` with configurable depths
-
-3. **Ray Casting** (`renderer.rs`)
-   - `cast_ray_with_params()` → `cast_ray_with_separate_depths()`
-   - Intersects ray with scene using `scene.intersect()`
-   - Computes lighting, reflection, and refraction recursively
-
-4. **Scene Intersection** (`scene.rs`)
-   - Tests ray against all spheres and ground plane
-   - Returns closest intersection with material properties
-
-5. **Sphere Intersection** (`geometry.rs`)
-   - Solves quadratic equation for ray-sphere intersection
-   - Handles self-intersection prevention with 0.001 offset
-
-6. **Material Properties** (`material.rs`)
-   - Defines albedo coefficients for diffuse/specular/reflection/refraction
-   - Refractive indices and surface properties
-
-### Ray Tracing Algorithm
-
-```rust
-fn cast_ray_with_separate_depths(
-    scene: &Scene,
-    orig: Vector3,
-    dir: Vector3,
-    depth: i32,
-    reflection_depth: i32,
-    refraction_depth: i32,
-    max_depth: i32,
-    max_reflection_depth: i32,
-    max_refraction_depth: i32
-) -> Vector3
+# With mesh primitives
+cargo run --release -- --mesh all -a 4
 ```
 
-**The recursive ray casting process:**
+## Gaussian Splatting Export
 
-1. **Depth Check**: Return background color if max depth exceeded
-2. **Scene Intersection**: Find nearest object hit by ray
-3. **Material Response**: Calculate surface properties at hit point
-4. **Lighting**: Compute diffuse/specular from all light sources with shadow testing
-5. **Reflection**: Cast reflection ray if `albedo[2] > 0` and within depth limit
-6. **Refraction**: Cast refraction ray if `albedo[3] > 0` and within depth limit
-7. **Color Mixing**: Combine all contributions using material albedo weights
+Export scene as 3D Gaussian Splats for real-time rendering:
 
-**Final color formula:**
-```rust
-material.diffuse_color * diffuse_intensity * albedo[0] +     // Diffuse
-Vector3::ONE * specular_intensity * albedo[1] +             // Specular
-reflect_color * albedo[2] +                                 // Reflection
-refract_color * albedo[3]                                   // Refraction
+```bash
+# Generate splats (view-independent SH0 color)
+cargo run --release -- -S output.ply --splat-density 200
+
+# Custom parameters
+cargo run --release -- -S scene.ply \
+    --splat-density 500 \
+    --sh-samples 64 \
+    --mesh torus
 ```
+
+**Output format:** Standard 3DGS PLY compatible with SuperSplat, Luma AI, bevy_gaussian_splatting.
+
+## CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `-a, --aa N` | Anti-aliasing samples NxN (default: 2) |
+| `-m, --max N` | Max ray depth (default: 32) |
+| `-r, --refl N` | Max reflection bounces (default: 6) |
+| `-f, --refr N` | Max refraction bounces (default: 16) |
+| `-n, --num N` | Number of random spheres (default: 200) |
+| `-e, --env FILE` | HDR environment map (.exr) |
+| `-x, --exposure F` | HDR exposure (default: 0.1) |
+| `--sky` | Procedural sky gradient |
+| `--mesh TYPE` | Add mesh: cube, pyramid, torus, all |
+| `--no-floor` | Disable checkerboard plane |
+| `--no-spheres` | Mesh-only mode |
+| `-S, --splats FILE` | Export Gaussian splats to PLY |
+| `--splat-density N` | Samples per unit area (default: 100) |
+| `--sh-samples N` | SH sampling rays (default: 64) |
+| `-t, --tonemap` | Apply Reinhard tonemapping |
+| `--adaptive-aa` | Adaptive sampling (default: on) |
 
 ## Materials
 
-### Predefined Materials
+| Material | Properties |
+|----------|------------|
+| Ivory | Diffuse with weak reflection |
+| Glass | Transparent, refractive index 1.333 |
+| Mirror | Highly reflective metallic |
+| Red Rubber | Matte, no transparency |
 
-| Material | Refractive Index | Albedo [D,S,R,T] | Properties |
-|----------|------------------|------------------|------------|
-| **Ivory** | 1.0 | [0.9, 0.5, 0.1, 0.0] | Diffuse surface with weak reflection |
-| **Glass** | 1.333 | [0.0, 0.9, 0.1, 0.8] | Transparent with strong refraction |
-| **Red Rubber** | 1.0 | [1.4, 0.3, 0.0, 0.0] | Matte surface, no transparency |
-| **Mirror** | 1.0 | [0.0, 16.0, 0.8, 0.0] | Highly reflective metallic surface |
-
-**Albedo Components:**
-- `[0]` - Diffuse contribution
-- `[1]` - Specular highlight intensity
-- `[2]` - Reflection strength
-- `[3]` - Refraction/transmission strength
-
-## Usage
-
-### Build and Run
-
-```bash
-# Build in release mode for optimal performance
-cargo build --release
-
-# Run with default settings
-cargo run --release
-
-# Run with custom depth limits
-cargo run --release -- -m 32 -r 6 -f 16
-```
-
-### Command Line Options
+## Architecture
 
 ```
-Usage: nanotracer [OPTIONS]
-
-Options:
-  -m, --max <MAX_DEPTH>          Maximum recursion depth [default: 32]
-  -r, --refl <REFLECTION_DEPTH>  Maximum reflection depth [default: 6]
-  -f, --refr <REFRACTION_DEPTH>  Maximum refraction depth [default: 16]
-  -n, --env <ENV_PATH>           HDR environment map file (.exr format)
-  -s, --sky                      Use procedural sky gradient instead of solid background
-  -e, --exp <EXPOSURE>           Exposure adjustment for HDR environment maps [default: 0.1]
-  -a, --aa <AA_SAMPLES>          Anti-aliasing samples per pixel [default: 1]
-  -t, --tonemap <BOOL>           Enable/disable tonemapping [default: true]
-  -S, --splats <PATH>            Export Gaussian splats to PLY (skip image render)
-      --sh-samples <N>           SH samples per splat [default: 64]
-      --splat-density <D>        Surface samples per unit area [default: 100]
-      --splat-scale <R>          Override splat scale (radius)
-      --mesh <TYPE>              Add mesh primitives: cube, pyramid, torus, all
-      --no-floor                 Disable checkerboard plane
-      --no-spheres               Disable default spheres
-  -h, --help                     Print help
-```
-
-### Gaussian Splats
-
-The splat exporter writes **view-independent SH0** (DC only) in 3DGS PLY format.
-High-frequency view effects (specular/refraction) are averaged into a single color.
-
-```bash
-# Balanced preview
-cargo run --release -- -S scene.ply --splat-density 200 --sh-samples 64
-
-# Disable tonemapping (keep linear colors)
-cargo run --release -- -S scene.ply --tonemap false
-```
-
-### Environment Options
-
-```bash
-# Default: solid blue background
-cargo run --release
-
-# Procedural sky gradient (short form)
-cargo run --release -- -s
-
-# HDR environment lighting with default exposure
-cargo run --release -- -n data/studio.exr
-
-# HDR with custom exposure adjustment (short form)
-cargo run --release -- -n data/studio.exr -e 0.05  # Darker
-cargo run --release -- -n data/studio.exr -e 0.2   # Brighter
-
-# Combine options with anti-aliasing
-cargo run --release -- -s -a 4
-cargo run --release -- -n data/studio.exr -e 0.15 -a 4
-```
-
-### Performance Tips
-
-- Use `--release` for 10x+ speedup over debug builds
-- Higher depth values increase quality but reduce performance exponentially
-- Reflection depth affects mirror and metallic surfaces
-- Refraction depth affects glass and transparent materials
-
-## Scene Configuration
-
-The scene is hardcoded in `main.rs` but easily modifiable:
-
-```rust
-// Add a new sphere
-scene.add_sphere(Sphere::new(
-    Vector3::new(x, y, z),    // Position
-    radius,                   // Size
-    MATERIAL,                 // Material preset
-));
-
-// Add a light source
-scene.add_light(Light {
-    position: Vector3::new(x, y, z),
-});
-```
-
-## Technical Details
-
-### Ray-Sphere Intersection
-
-Uses analytical solution to quadratic equation:
-```rust
-let l = sphere.center - ray_origin;
-let tca = l.dot(ray_direction);
-let d2 = l.dot(l) - tca * tca;
-if d2 > sphere.radius² { return miss; }
-let thc = sqrt(sphere.radius² - d2);
-let t = tca ± thc;  // Two intersection points
-```
-
-### Reflection Formula
-
-```rust
-reflect_dir = incident - normal * 2.0 * incident.dot(normal)
-```
-
-### Refraction (Snell's Law)
-
-```rust
-eta = eta_incident / eta_transmitted;
-cos_i = -incident.dot(normal);
-k = 1 - eta² * (1 - cos_i²);
-if k < 0 { total_internal_reflection; }
-refract_dir = incident * eta + normal * (eta * cos_i - sqrt(k));
-```
-
-### Parallelization
-
-Uses Rayon for pixel-parallel rendering:
-```rust
-framebuffer.par_iter_mut().enumerate().for_each(|(i, pixel)| {
-    // Ray casting per pixel happens in parallel
-});
+src/
+├── main.rs          # CLI, scene setup, render loop
+├── renderer.rs      # Ray casting, RayConfig, lighting
+├── simd_renderer.rs # SIMD-optimized Vec3x4, ray-sphere
+├── scene.rs         # Scene graph, BVH traversal
+├── geometry.rs      # Sphere, Object, intersection
+├── mesh.rs          # Triangle mesh with BVH (rtbvh)
+├── material.rs      # Material definitions
+├── environment.rs   # HDR/procedural sky
+├── color.rs         # Tonemapping, sRGB conversion
+└── splat/           # Gaussian splatting module
+    ├── sampler.rs   # Surface sampling (Fibonacci sphere)
+    ├── sh.rs        # Spherical harmonics fitting
+    └── ply.rs       # PLY file writer
 ```
 
 ## Dependencies
 
-- **rayon** - Data parallelism for multi-core rendering
-- **glam** - Fast SIMD vector math library
-- **image** - PNG/JPEG image saving
-- **clap** - Command line argument parsing
-- **exr** - HDR environment map loading (OpenEXR format)
+- **rayon** - parallel iteration
+- **glam** - vector math
+- **wide** - SIMD operations
+- **rtbvh** - BVH acceleration
+- **image** - PNG output
+- **exr** - HDR environment loading
+- **clap** - CLI parsing
 
-## Output
+## Performance
 
-Renders to `output.png` in the current directory at 1024×768 resolution.
+- 24 cores: ~1s for 50 objects at 2x AA
+- SIMD sphere intersection (4 rays/batch)
+- Auto tile sizing based on CPU cores
+- BVH acceleration for meshes
 
 ## License
 
-MIT License - Feel free to use and modify for educational and commercial purposes.
+MIT
