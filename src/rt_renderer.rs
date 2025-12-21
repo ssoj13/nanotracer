@@ -1,6 +1,5 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::mem;
-use std::ptr;
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -9,6 +8,7 @@ use glam::Vec3;
 use crate::environment::EnvGpuData;
 use crate::gpu_scene::build_gpu_scene;
 use crate::scene::Scene;
+use crate::vk_runtime::{AccelResource, BufferResource, ImageResource, VkContext};
 
 pub struct RenderConfig {
     pub width: u32,
@@ -46,116 +46,25 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
     let gpu_scene = build_gpu_scene(scene);
     let env = scene.environment.as_ref().map(|env| env.gpu_data());
 
-    let entry = unsafe { ash::Entry::load()? };
+    let ctx = VkContext::new()?;
+    let device = &ctx.device;
+    let command_buffer = ctx.command_buffer;
+    let queue = ctx.queue;
+    let accel_loader = &ctx.accel_loader;
 
-    let app_name = CString::new("nanotracer-rs")?;
-    let engine_name = CString::new("nanotracer")?;
-    let app_info = vk::ApplicationInfo {
-        p_application_name: app_name.as_ptr(),
-        application_version: 0,
-        p_engine_name: engine_name.as_ptr(),
-        engine_version: 0,
-        api_version: vk::make_api_version(0, 1, 2, 0),
-        ..Default::default()
-    };
-
-    let instance_info = vk::InstanceCreateInfo {
-        p_application_info: &app_info,
-        ..Default::default()
-    };
-
-    let instance = unsafe { entry.create_instance(&instance_info, None)? };
-
-    let (physical_device, queue_family_index) = pick_device(&instance)?;
-
-    let device_extensions = [
-        vk::KHR_ACCELERATION_STRUCTURE_NAME.as_ptr(),
-        vk::KHR_RAY_QUERY_NAME.as_ptr(),
-        vk::KHR_DEFERRED_HOST_OPERATIONS_NAME.as_ptr(),
-        vk::KHR_BUFFER_DEVICE_ADDRESS_NAME.as_ptr(),
-        vk::KHR_SPIRV_1_4_NAME.as_ptr(),
-        vk::KHR_SHADER_FLOAT_CONTROLS_NAME.as_ptr(),
-    ];
-
-    let mut bda_features = vk::PhysicalDeviceBufferDeviceAddressFeatures {
-        buffer_device_address: vk::TRUE,
-        ..Default::default()
-    };
-    let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR {
-        ray_query: vk::TRUE,
-        p_next: &mut bda_features as *mut _ as *mut _,
-        ..Default::default()
-    };
-    let mut accel_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR {
-        acceleration_structure: vk::TRUE,
-        p_next: &mut ray_query_features as *mut _ as *mut _,
-        ..Default::default()
-    };
-
-    let queue_priorities = [1.0f32];
-    let queue_info = [vk::DeviceQueueCreateInfo {
-        queue_family_index,
-        queue_count: 1,
-        p_queue_priorities: queue_priorities.as_ptr(),
-        ..Default::default()
-    }];
-
-    let device_info = vk::DeviceCreateInfo {
-        queue_create_info_count: queue_info.len() as u32,
-        p_queue_create_infos: queue_info.as_ptr(),
-        enabled_extension_count: device_extensions.len() as u32,
-        pp_enabled_extension_names: device_extensions.as_ptr(),
-        p_next: &mut accel_features as *mut _ as *mut _,
-        ..Default::default()
-    };
-
-    let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
-    let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
-
-    let accel_loader = ash::khr::acceleration_structure::Device::new(&instance, &device);
-
-    let command_pool = unsafe {
-        device.create_command_pool(
-            &vk::CommandPoolCreateInfo {
-                queue_family_index,
-                flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-                ..Default::default()
-            },
-            None,
-        )?
-    };
-
-    let command_buffer = unsafe {
-        device.allocate_command_buffers(&vk::CommandBufferAllocateInfo {
-            command_pool,
-            level: vk::CommandBufferLevel::PRIMARY,
-            command_buffer_count: 1,
-            ..Default::default()
-        })?
-    }[0];
-
-    let vertices_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let vertices_buffer = ctx.create_buffer_with_data(
         &gpu_scene.vertices,
         vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
     )?;
 
-    let normals_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let normals_buffer = ctx.create_buffer_with_data(
         &gpu_scene.normals,
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
-    let triangles_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let triangles_buffer = ctx.create_buffer_with_data(
         &gpu_scene.triangles,
         vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::STORAGE_BUFFER
@@ -168,47 +77,29 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         .flat_map(|tri| [tri.v0, tri.v1, tri.v2])
         .collect::<Vec<u32>>();
 
-    let indices_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let indices_buffer = ctx.create_buffer_with_data(
         &indices_flat,
         vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
     )?;
 
-    let tri_materials_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let tri_materials_buffer = ctx.create_buffer_with_data(
         &gpu_scene.tri_materials,
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
-    let materials_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let materials_buffer = ctx.create_buffer_with_data(
         &gpu_scene.materials,
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
-    let lights_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let lights_buffer = ctx.create_buffer_with_data(
         &gpu_scene.lights,
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
-    let (blas, tlas) = build_acceleration_structures(
-        &instance,
-        &device,
-        &accel_loader,
-        physical_device,
-        command_buffer,
-        queue,
+    let (blas, tlas) = ctx.build_acceleration_structures(
         &vertices_buffer,
         &indices_buffer,
         gpu_scene.vertices.len() as u32,
@@ -223,12 +114,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         use_sky: true,
     });
 
-    let env_image = create_image_with_data(
-        &instance,
-        &device,
-        physical_device,
-        command_buffer,
-        queue,
+    let env_image = ctx.create_image_with_data(
         env_data.width,
         env_data.height,
         vk::Format::R32G32B32A32_SFLOAT,
@@ -249,19 +135,13 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         )?
     };
 
-    let output_image = create_storage_image(
-        &instance,
-        &device,
-        physical_device,
+    let output_image = ctx.create_storage_image(
         config.width,
         config.height,
         vk::Format::R32G32B32A32_SFLOAT,
     )?;
 
-    let output_buffer = create_buffer(
-        &instance,
-        &device,
-        physical_device,
+    let output_buffer = ctx.create_buffer(
         (config.width * config.height * 4 * mem::size_of::<f32>() as u32) as vk::DeviceSize,
         vk::BufferUsageFlags::TRANSFER_DST,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -286,10 +166,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         _pad1: 0,
     };
 
-    let params_buffer = create_buffer_with_data(
-        &instance,
-        &device,
-        physical_device,
+    let params_buffer = ctx.create_buffer_with_data(
         &[params],
         vk::BufferUsageFlags::UNIFORM_BUFFER,
     )?;
@@ -306,7 +183,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         )?
     };
 
-    let shader_module = create_shader_module(&device, COMPUTE_SHADER)?;
+    let shader_module = ctx.create_shader_module(COMPUTE_SHADER, "ray_query.comp")?;
 
     let stage_info = vk::PipelineShaderStageCreateInfo {
         stage: vk::ShaderStageFlags::COMPUTE,
@@ -391,9 +268,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
     unsafe {
         device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())?;
 
-        transition_image(
-            &device,
-            command_buffer,
+        ctx.transition_image(
             output_image.image,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::GENERAL,
@@ -413,9 +288,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         let group_y = (config.height + 7) / 8;
         device.cmd_dispatch(command_buffer, group_x, group_y, 1);
 
-        transition_image(
-            &device,
-            command_buffer,
+        ctx.transition_image(
             output_image.image,
             vk::ImageLayout::GENERAL,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
@@ -477,17 +350,17 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
 
     unsafe {
         device.destroy_sampler(env_sampler, None);
-        destroy_image(&device, &env_image);
-        destroy_image(&device, &output_image);
-        destroy_buffer(&device, &params_buffer);
-        destroy_buffer(&device, &output_buffer);
-        destroy_buffer(&device, &lights_buffer);
-        destroy_buffer(&device, &tri_materials_buffer);
-        destroy_buffer(&device, &materials_buffer);
-        destroy_buffer(&device, &indices_buffer);
-        destroy_buffer(&device, &normals_buffer);
-        destroy_buffer(&device, &triangles_buffer);
-        destroy_buffer(&device, &vertices_buffer);
+        ctx.destroy_image(&env_image);
+        ctx.destroy_image(&output_image);
+        ctx.destroy_buffer(&params_buffer);
+        ctx.destroy_buffer(&output_buffer);
+        ctx.destroy_buffer(&lights_buffer);
+        ctx.destroy_buffer(&tri_materials_buffer);
+        ctx.destroy_buffer(&materials_buffer);
+        ctx.destroy_buffer(&indices_buffer);
+        ctx.destroy_buffer(&normals_buffer);
+        ctx.destroy_buffer(&triangles_buffer);
+        ctx.destroy_buffer(&vertices_buffer);
 
         accel_loader.destroy_acceleration_structure(blas.handle, None);
         accel_loader.destroy_acceleration_structure(tlas.handle, None);
@@ -501,660 +374,10 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         device.destroy_pipeline_layout(pipeline_layout, None);
         device.destroy_descriptor_pool(descriptor_pool, None);
         device.destroy_descriptor_set_layout(descriptor_set_layout, None);
-        device.destroy_command_pool(command_pool, None);
-        device.destroy_device(None);
-        instance.destroy_instance(None);
     }
 
+    ctx.destroy();
     Ok(data)
-}
-
-fn pick_device(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32), Box<dyn std::error::Error>> {
-    let physical_devices = unsafe { instance.enumerate_physical_devices()? };
-
-    for device in physical_devices {
-        let props = unsafe { instance.get_physical_device_properties(device) };
-        let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
-
-        let queue_family_index = find_queue_family(instance, device)?;
-        if queue_family_index.is_none() {
-            continue;
-        }
-
-        if supports_extensions(instance, device)? {
-            println!("Using GPU: {}", name);
-            return Ok((device, queue_family_index.unwrap()));
-        }
-    }
-
-    Err("No suitable Vulkan device found".into())
-}
-
-fn find_queue_family(instance: &ash::Instance, device: vk::PhysicalDevice) -> Result<Option<u32>, vk::Result> {
-    let families = unsafe { instance.get_physical_device_queue_family_properties(device) };
-    for (index, family) in families.iter().enumerate() {
-        if family.queue_flags.contains(vk::QueueFlags::COMPUTE) {
-            return Ok(Some(index as u32));
-        }
-    }
-    Ok(None)
-}
-
-fn supports_extensions(instance: &ash::Instance, device: vk::PhysicalDevice) -> Result<bool, vk::Result> {
-    let available = unsafe { instance.enumerate_device_extension_properties(device)? };
-    let mut required = vec![
-        vk::KHR_ACCELERATION_STRUCTURE_NAME.to_string_lossy(),
-        vk::KHR_RAY_QUERY_NAME.to_string_lossy(),
-        vk::KHR_DEFERRED_HOST_OPERATIONS_NAME.to_string_lossy(),
-        vk::KHR_BUFFER_DEVICE_ADDRESS_NAME.to_string_lossy(),
-        vk::KHR_SPIRV_1_4_NAME.to_string_lossy(),
-        vk::KHR_SHADER_FLOAT_CONTROLS_NAME.to_string_lossy(),
-    ];
-
-    for ext in available {
-        let ext_name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }.to_string_lossy();
-        required.retain(|r| r.as_ref() != ext_name.as_ref());
-    }
-
-    Ok(required.is_empty())
-}
-
-struct BufferResource {
-    buffer: vk::Buffer,
-    memory: vk::DeviceMemory,
-    size: vk::DeviceSize,
-}
-
-fn create_buffer_with_data<T: Pod>(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    data: &[T],
-    usage: vk::BufferUsageFlags,
-) -> Result<BufferResource, Box<dyn std::error::Error>> {
-    let size = (data.len() * mem::size_of::<T>()) as vk::DeviceSize;
-    let buffer = create_buffer(
-        instance,
-        device,
-        physical_device,
-        size,
-        usage,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    )?;
-
-    unsafe {
-        let ptr = device.map_memory(buffer.memory, 0, size, vk::MemoryMapFlags::empty())?;
-        ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr as *mut u8, size as usize);
-        device.unmap_memory(buffer.memory);
-    }
-
-    Ok(buffer)
-}
-
-fn create_buffer(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    size: vk::DeviceSize,
-    usage: vk::BufferUsageFlags,
-    properties: vk::MemoryPropertyFlags,
-) -> Result<BufferResource, Box<dyn std::error::Error>> {
-    let buffer = unsafe {
-        device.create_buffer(
-            &vk::BufferCreateInfo {
-                size,
-                usage,
-                ..Default::default()
-            },
-            None,
-        )?
-    };
-
-    let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-    let memory_type_index = find_memory_type(instance, physical_device, requirements.memory_type_bits, properties)?;
-
-    let alloc_flags = vk::MemoryAllocateFlagsInfo {
-        flags: vk::MemoryAllocateFlags::DEVICE_ADDRESS,
-        ..Default::default()
-    };
-
-    let alloc_info = vk::MemoryAllocateInfo {
-        allocation_size: requirements.size,
-        memory_type_index,
-        p_next: &alloc_flags as *const _ as *const _,
-        ..Default::default()
-    };
-
-    let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
-    unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
-
-    Ok(BufferResource {
-        buffer,
-        memory,
-        size: requirements.size,
-    })
-}
-
-fn destroy_buffer(device: &ash::Device, buffer: &BufferResource) {
-    unsafe {
-        device.destroy_buffer(buffer.buffer, None);
-        device.free_memory(buffer.memory, None);
-    }
-}
-
-fn find_memory_type(
-    instance: &ash::Instance,
-    physical_device: vk::PhysicalDevice,
-    type_filter: u32,
-    properties: vk::MemoryPropertyFlags,
-) -> Result<u32, Box<dyn std::error::Error>> {
-    let mem_properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-    for i in 0..mem_properties.memory_type_count {
-        if type_filter & (1 << i) != 0
-            && mem_properties.memory_types[i as usize]
-                .property_flags
-                .contains(properties)
-        {
-            return Ok(i);
-        }
-    }
-    Err("Unable to find suitable memory type".into())
-}
-
-struct AccelResource {
-    handle: vk::AccelerationStructureKHR,
-    buffer: vk::Buffer,
-    memory: vk::DeviceMemory,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Zeroable, Pod)]
-struct AccelInstance {
-    transform: [f32; 12],
-    instance_custom_index_and_mask: u32,
-    instance_shader_binding_table_record_offset_and_flags: u32,
-    acceleration_structure_reference: u64,
-}
-
-fn build_acceleration_structures(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    accel_loader: &ash::khr::acceleration_structure::Device,
-    physical_device: vk::PhysicalDevice,
-    command_buffer: vk::CommandBuffer,
-    queue: vk::Queue,
-    vertices: &BufferResource,
-    indices: &BufferResource,
-    vertex_count: u32,
-    triangle_count: u32,
-) -> Result<(AccelResource, AccelResource), Box<dyn std::error::Error>> {
-    unsafe { device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())? };
-    unsafe { device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())? };
-
-    let vertex_address = get_buffer_device_address(device, vertices.buffer);
-    let index_address = get_buffer_device_address(device, indices.buffer);
-
-    let triangles_data = vk::AccelerationStructureGeometryTrianglesDataKHR {
-        vertex_format: vk::Format::R32G32B32_SFLOAT,
-        vertex_data: vk::DeviceOrHostAddressConstKHR { device_address: vertex_address },
-        vertex_stride: mem::size_of::<[f32; 4]>() as vk::DeviceSize,
-        max_vertex: vertex_count.saturating_sub(1),
-        index_type: vk::IndexType::UINT32,
-        index_data: vk::DeviceOrHostAddressConstKHR { device_address: index_address },
-        ..Default::default()
-    };
-
-    let geometry = vk::AccelerationStructureGeometryKHR {
-        geometry_type: vk::GeometryTypeKHR::TRIANGLES,
-        geometry: vk::AccelerationStructureGeometryDataKHR { triangles: triangles_data },
-        flags: vk::GeometryFlagsKHR::OPAQUE,
-        ..Default::default()
-    };
-
-    let range = vk::AccelerationStructureBuildRangeInfoKHR {
-        primitive_count: triangle_count,
-        primitive_offset: 0,
-        first_vertex: 0,
-        transform_offset: 0,
-    };
-
-    let build_info = vk::AccelerationStructureBuildGeometryInfoKHR {
-        ty: vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
-        flags: vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE,
-        mode: vk::BuildAccelerationStructureModeKHR::BUILD,
-        geometry_count: 1,
-        p_geometries: &geometry,
-        ..Default::default()
-    };
-
-    let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
-    unsafe {
-        accel_loader.get_acceleration_structure_build_sizes(
-            vk::AccelerationStructureBuildTypeKHR::DEVICE,
-            &build_info,
-            &[triangle_count],
-            &mut size_info,
-        );
-    }
-
-    let blas = create_accel_resource(
-        instance,
-        device,
-        physical_device,
-        accel_loader,
-        size_info.acceleration_structure_size,
-        vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
-    )?;
-
-    let scratch = create_buffer(
-        instance,
-        device,
-        physical_device,
-        size_info.build_scratch_size,
-        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )?;
-
-    let build_info = vk::AccelerationStructureBuildGeometryInfoKHR {
-        ty: vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
-        flags: vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE,
-        mode: vk::BuildAccelerationStructureModeKHR::BUILD,
-        geometry_count: 1,
-        p_geometries: &geometry,
-        dst_acceleration_structure: blas.handle,
-        scratch_data: vk::DeviceOrHostAddressKHR {
-            device_address: get_buffer_device_address(device, scratch.buffer),
-        },
-        ..Default::default()
-    };
-
-    let range_infos = [range];
-    let range_ptrs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&range_infos];
-    unsafe {
-        accel_loader.cmd_build_acceleration_structures(command_buffer, &[build_info], &range_ptrs);
-    }
-
-    let barrier = vk::MemoryBarrier {
-        src_access_mask: vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
-        dst_access_mask: vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR,
-        ..Default::default()
-    };
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
-            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
-            vk::DependencyFlags::empty(),
-            &[barrier],
-            &[],
-            &[],
-        );
-    }
-
-    let blas_address = unsafe {
-        accel_loader.get_acceleration_structure_device_address(&vk::AccelerationStructureDeviceAddressInfoKHR {
-            acceleration_structure: blas.handle,
-            ..Default::default()
-        })
-    };
-
-    let instance_flags =
-        vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw()
-            | vk::GeometryInstanceFlagsKHR::FORCE_OPAQUE.as_raw();
-    let instance_data = AccelInstance {
-        transform: [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-        ],
-        instance_custom_index_and_mask: (0 & 0x00FF_FFFF) | (0xFF << 24),
-        instance_shader_binding_table_record_offset_and_flags: (0 & 0x00FF_FFFF)
-            | (instance_flags << 24),
-        acceleration_structure_reference: blas_address,
-    };
-
-    let instance_buffer = create_buffer_with_data(
-        instance,
-        device,
-        physical_device,
-        &[instance_data],
-        vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
-            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-    )?;
-
-    let tlas_geometry = vk::AccelerationStructureGeometryKHR {
-        geometry_type: vk::GeometryTypeKHR::INSTANCES,
-        geometry: vk::AccelerationStructureGeometryDataKHR {
-            instances: vk::AccelerationStructureGeometryInstancesDataKHR {
-                array_of_pointers: vk::FALSE,
-                data: vk::DeviceOrHostAddressConstKHR {
-                    device_address: get_buffer_device_address(device, instance_buffer.buffer),
-                },
-                ..Default::default()
-            },
-        },
-        ..Default::default()
-    };
-
-    let tlas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR {
-        ty: vk::AccelerationStructureTypeKHR::TOP_LEVEL,
-        flags: vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE,
-        mode: vk::BuildAccelerationStructureModeKHR::BUILD,
-        geometry_count: 1,
-        p_geometries: &tlas_geometry,
-        ..Default::default()
-    };
-
-    let mut tlas_size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
-    unsafe {
-        accel_loader.get_acceleration_structure_build_sizes(
-            vk::AccelerationStructureBuildTypeKHR::DEVICE,
-            &tlas_build_info,
-            &[1],
-            &mut tlas_size_info,
-        );
-    }
-
-    let tlas = create_accel_resource(
-        instance,
-        device,
-        physical_device,
-        accel_loader,
-        tlas_size_info.acceleration_structure_size,
-        vk::AccelerationStructureTypeKHR::TOP_LEVEL,
-    )?;
-
-    let tlas_scratch = create_buffer(
-        instance,
-        device,
-        physical_device,
-        tlas_size_info.build_scratch_size,
-        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )?;
-
-    let tlas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR {
-        ty: vk::AccelerationStructureTypeKHR::TOP_LEVEL,
-        flags: vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE,
-        mode: vk::BuildAccelerationStructureModeKHR::BUILD,
-        geometry_count: 1,
-        p_geometries: &tlas_geometry,
-        dst_acceleration_structure: tlas.handle,
-        scratch_data: vk::DeviceOrHostAddressKHR {
-            device_address: get_buffer_device_address(device, tlas_scratch.buffer),
-        },
-        ..Default::default()
-    };
-
-    let tlas_range = vk::AccelerationStructureBuildRangeInfoKHR {
-        primitive_count: 1,
-        primitive_offset: 0,
-        first_vertex: 0,
-        transform_offset: 0,
-    };
-    let tlas_ranges = [tlas_range];
-    let tlas_ptrs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&tlas_ranges];
-    unsafe {
-        accel_loader.cmd_build_acceleration_structures(command_buffer, &[tlas_build_info], &tlas_ptrs);
-    }
-
-    unsafe { device.end_command_buffer(command_buffer)? };
-    unsafe {
-        let submit_info = vk::SubmitInfo {
-            command_buffer_count: 1,
-            p_command_buffers: &command_buffer,
-            ..Default::default()
-        };
-        device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
-        device.queue_wait_idle(queue)?;
-    }
-
-    destroy_buffer(device, &scratch);
-    destroy_buffer(device, &instance_buffer);
-    destroy_buffer(device, &tlas_scratch);
-
-    Ok((blas, tlas))
-}
-
-fn create_accel_resource(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    accel_loader: &ash::khr::acceleration_structure::Device,
-    size: vk::DeviceSize,
-    ty: vk::AccelerationStructureTypeKHR,
-) -> Result<AccelResource, Box<dyn std::error::Error>> {
-    let buffer = create_buffer(
-        instance,
-        device,
-        physical_device,
-        size,
-        vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )?;
-
-    let accel_info = vk::AccelerationStructureCreateInfoKHR {
-        buffer: buffer.buffer,
-        size,
-        ty,
-        ..Default::default()
-    };
-    let handle = unsafe { accel_loader.create_acceleration_structure(&accel_info, None)? };
-
-    Ok(AccelResource {
-        handle,
-        buffer: buffer.buffer,
-        memory: buffer.memory,
-    })
-}
-
-fn get_buffer_device_address(device: &ash::Device, buffer: vk::Buffer) -> vk::DeviceAddress {
-    let info = vk::BufferDeviceAddressInfo { buffer, ..Default::default() };
-    unsafe { device.get_buffer_device_address(&info) }
-}
-
-struct ImageResource {
-    image: vk::Image,
-    memory: vk::DeviceMemory,
-    view: vk::ImageView,
-}
-
-fn create_storage_image(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    width: u32,
-    height: u32,
-    format: vk::Format,
-) -> Result<ImageResource, Box<dyn std::error::Error>> {
-    create_image(
-        instance,
-        device,
-        physical_device,
-        width,
-        height,
-        format,
-        vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
-    )
-}
-
-fn create_image_with_data<T: Pod>(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    command_buffer: vk::CommandBuffer,
-    queue: vk::Queue,
-    width: u32,
-    height: u32,
-    format: vk::Format,
-    data: &[T],
-) -> Result<ImageResource, Box<dyn std::error::Error>> {
-    let image = create_image(
-        instance,
-        device,
-        physical_device,
-        width,
-        height,
-        format,
-        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-    )?;
-
-    let staging = create_buffer_with_data(
-        instance,
-        device,
-        physical_device,
-        data,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-    )?;
-
-    unsafe { device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())? };
-    unsafe { device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())? };
-
-    transition_image(device, command_buffer, image.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-
-    let region = vk::BufferImageCopy {
-        image_subresource: vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        },
-        image_extent: vk::Extent3D { width, height, depth: 1 },
-        ..Default::default()
-    };
-
-    unsafe {
-        device.cmd_copy_buffer_to_image(
-            command_buffer,
-            staging.buffer,
-            image.image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[region],
-        );
-    }
-
-    transition_image(device, command_buffer, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-
-    unsafe { device.end_command_buffer(command_buffer)? };
-    unsafe {
-        let submit_info = vk::SubmitInfo {
-            command_buffer_count: 1,
-            p_command_buffers: &command_buffer,
-            ..Default::default()
-        };
-        device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
-        device.queue_wait_idle(queue)?;
-    }
-
-    destroy_buffer(device, &staging);
-
-    Ok(image)
-}
-
-fn create_image(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    width: u32,
-    height: u32,
-    format: vk::Format,
-    usage: vk::ImageUsageFlags,
-) -> Result<ImageResource, Box<dyn std::error::Error>> {
-    let image = unsafe {
-        device.create_image(
-            &vk::ImageCreateInfo {
-                image_type: vk::ImageType::TYPE_2D,
-                format,
-                extent: vk::Extent3D { width, height, depth: 1 },
-                mip_levels: 1,
-                array_layers: 1,
-                samples: vk::SampleCountFlags::TYPE_1,
-                tiling: vk::ImageTiling::OPTIMAL,
-                usage,
-                initial_layout: vk::ImageLayout::UNDEFINED,
-                ..Default::default()
-            },
-            None,
-        )?
-    };
-
-    let requirements = unsafe { device.get_image_memory_requirements(image) };
-    let memory_type_index = find_memory_type(
-        instance,
-        physical_device,
-        requirements.memory_type_bits,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )?;
-    let alloc_info = vk::MemoryAllocateInfo {
-        allocation_size: requirements.size,
-        memory_type_index,
-        ..Default::default()
-    };
-    let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
-    unsafe { device.bind_image_memory(image, memory, 0)? };
-
-    let view = unsafe {
-        device.create_image_view(
-            &vk::ImageViewCreateInfo {
-                image,
-                view_type: vk::ImageViewType::TYPE_2D,
-                format,
-                subresource_range: vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            },
-            None,
-        )?
-    };
-
-    Ok(ImageResource { image, memory, view })
-}
-
-fn transition_image(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    image: vk::Image,
-    old_layout: vk::ImageLayout,
-    new_layout: vk::ImageLayout,
-) {
-    let barrier = vk::ImageMemoryBarrier {
-        old_layout,
-        new_layout,
-        image,
-        subresource_range: vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        },
-        ..Default::default()
-    };
-
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
-    }
-}
-
-fn destroy_image(device: &ash::Device, image: &ImageResource) {
-    unsafe {
-        device.destroy_image_view(image.view, None);
-        device.destroy_image(image.image, None);
-        device.free_memory(image.memory, None);
-    }
 }
 
 fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, vk::Result> {
@@ -1400,17 +623,6 @@ fn write_descriptor_set(
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
-fn create_shader_module(device: &ash::Device, source: &str) -> Result<vk::ShaderModule, Box<dyn std::error::Error>> {
-    let compiler = shaderc::Compiler::new()?;
-    let binary = compiler.compile_into_spirv(source, shaderc::ShaderKind::Compute, "ray_query.comp", "main", None)?;
-    let module_info = vk::ShaderModuleCreateInfo {
-        code_size: binary.as_binary().len() * 4,
-        p_code: binary.as_binary().as_ptr(),
-        ..Default::default()
-    };
-    let module = unsafe { device.create_shader_module(&module_info, None)? };
-    Ok(module)
-}
 
 const COMPUTE_SHADER: &str = r#"#version 460
 #extension GL_EXT_ray_query : require
