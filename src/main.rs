@@ -86,6 +86,14 @@ struct Args {
     #[arg(long = "sh-samples", default_value_t = 64)]
     sh_samples: u32,
 
+    /// Multiplier for SH samples on glossy/refractive materials (default: 1.5)
+    #[arg(long = "sh-glossy-mult", default_value_t = 1.5)]
+    sh_glossy_mult: f32,
+
+    /// Clamp radiance before tonemapping (0 disables, default: 20)
+    #[arg(long = "radiance-clamp", default_value_t = 20.0)]
+    radiance_clamp: f32,
+
     /// Surface samples per unit area (default: 100)
     #[arg(long = "splat-density", default_value_t = 100.0)]
     splat_density: f32,
@@ -179,6 +187,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             refraction_depth: args.refraction_depth,
             scale_override: args.splat_scale,
             tonemap: args.tonemap,
+            glossy_mult: args.sh_glossy_mult,
+            radiance_clamp: args.radiance_clamp,
             seed: scene_seed,
         };
         let gaussians = generate_splats_gpu(&scene, &config)?;

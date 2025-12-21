@@ -48,6 +48,12 @@ cargo run --release -- --mesh all -a 4
 | `--no-floor` | Disable checkerboard plane |
 | `--no-spheres` | Mesh-only mode |
 | `-t, --tonemap` | Apply Reinhard tonemapping |
+| `-S, --splats FILE` | Export Gaussian splats to PLY |
+| `--sh-samples N` | SH sample directions per splat (default: 64) |
+| `--sh-glossy-mult F` | SH sample multiplier for glossy/refractive materials (default: 1.5) |
+| `--radiance-clamp F` | Clamp radiance before tonemapping (0 disables, default: 20) |
+| `--splat-density F` | Surface samples per unit area (default: 100) |
+| `--splat-scale F` | Override splat scale (auto from density if unset) |
 
 ## Materials
 

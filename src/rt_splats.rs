@@ -20,6 +20,8 @@ pub struct SplatConfigGpu {
     pub refraction_depth: i32,
     pub scale_override: Option<f32>,
     pub tonemap: bool,
+    pub glossy_mult: f32,
+    pub radiance_clamp: f32,
     pub seed: u64,
 }
 
@@ -40,6 +42,8 @@ struct GpuParams {
     tonemap: u32,
     exposure: f32,
     splat_scale: f32,
+    radiance_clamp: f32,
+    glossy_mult: f32,
     seed_lo: u32,
     seed_hi: u32,
 }
@@ -175,6 +179,8 @@ pub fn generate_splats_gpu(
         tonemap: if config.tonemap { 1 } else { 0 },
         exposure: env_data.exposure,
         splat_scale,
+        radiance_clamp: config.radiance_clamp.max(0.0),
+        glossy_mult: config.glossy_mult.max(1.0),
         seed_lo: (config.seed & 0xFFFF_FFFF) as u32,
         seed_hi: ((config.seed >> 32) & 0xFFFF_FFFF) as u32,
     };
@@ -700,6 +706,8 @@ layout(set = 0, binding = 9) uniform Params {
     uint tonemap;
     float exposure;
     float splat_scale;
+    float radiance_clamp;
+    float glossy_mult;
     uint seed_lo;
     uint seed_hi;
 } params;
@@ -723,6 +731,18 @@ uint wang_hash(uint seed) {
 
 float rand01(uint seed) {
     return float(wang_hash(seed)) / 4294967296.0;
+}
+
+const float PI = 3.14159265;
+const float GOLDEN = 0.61803398875;
+
+vec3 sample_uniform_hemisphere(uint seed, uint idx, uint count) {
+    float u1 = (float(idx) + rand01(seed + idx * 1664525u)) / max(1.0, float(count));
+    float u2 = fract((float(idx) + rand01(seed + idx * 1013904223u)) * GOLDEN);
+    float z = 1.0 - u1;
+    float r = sqrt(max(0.0, 1.0 - z * z));
+    float phi = 2.0 * PI * u2;
+    return vec3(r * cos(phi), r * sin(phi), z);
 }
 
 float max_component(vec3 v) {
@@ -1142,18 +1162,28 @@ void main() {
         }
     }
 
-    for (uint s = 0u; s < params.sh_samples; ++s) {
-        float fi = float(s) + 0.5;
-        float n = float(params.sh_samples);
-        float z = 1.0 - fi / n;
-        float r = sqrt(max(0.0, 1.0 - z * z));
-        float theta = 2.0 * 3.14159265 * fi / 1.61803398875;
-        vec3 local_dir = normalize(vec3(r * cos(theta), r * sin(theta), z));
+    uint sh_samples = params.sh_samples;
+    float glossy_mult = max(params.glossy_mult, 1.0);
+    if (mat.albedo.z > 0.0 || mat.albedo.w > 0.0) {
+        sh_samples = uint(float(params.sh_samples) * glossy_mult);
+    }
+    sh_samples = max(sh_samples, 1u);
+
+    uint dir_seed = seed_base ^ (id * 1597334677u);
+    for (uint s = 0u; s < sh_samples; ++s) {
+        vec3 local_dir = sample_uniform_hemisphere(dir_seed, s, sh_samples);
         vec3 world_dir = normalize(local_dir.x * tangent + local_dir.y * bitangent + local_dir.z * normal);
 
         vec3 view_dir = world_dir;
         uint sample_seed = seed_base ^ (id * 747796405u) ^ (s * 277803737u);
         vec3 radiance = shade_surface(pos, normal, view_dir, mat, diffuse_color, sample_seed);
+        float clamp_val = max(params.radiance_clamp, 0.0);
+        if (clamp_val > 0.0) {
+            float luma = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+            if (luma > clamp_val) {
+                radiance *= clamp_val / luma;
+            }
+        }
         vec3 mapped = (params.tonemap != 0u) ? tonemap_reinhard(radiance) : clamp(radiance, vec3(0.0), vec3(1.0));
         vec3 srgb = linear_to_srgb(mapped);
         vec3 b = srgb - vec3(0.5);
