@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::mem;
 
 use ash::vk;
+use indicatif::{ProgressBar, ProgressStyle};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
@@ -61,6 +62,14 @@ pub fn generate_splats_gpu(
     let gpu_scene = build_gpu_scene(scene);
     let env = scene.environment.as_ref().map(|env| env.gpu_data());
 
+    let pb = ProgressBar::new(7);
+    pb.set_style(
+        ProgressStyle::with_template("{msg} [{bar:40}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.set_message("upload buffers");
+
     let total_area: f32 = gpu_scene.tri_areas.iter().sum();
     if total_area <= 0.0 {
         return Ok(Vec::new());
@@ -111,6 +120,8 @@ pub fn generate_splats_gpu(
 
     let cdf_buffer = ctx.create_buffer_with_data(&gpu_scene.tri_cdf, vk::BufferUsageFlags::STORAGE_BUFFER)?;
 
+    pb.inc(1);
+    pb.set_message("build acceleration");
     let (blas, tlas) = ctx.build_acceleration_structures(
         &vertices_buffer,
         &indices_buffer,
@@ -118,6 +129,8 @@ pub fn generate_splats_gpu(
         gpu_scene.triangles.len() as u32,
     )?;
 
+    pb.inc(1);
+    pb.set_message("upload environment");
     let env_data = env.unwrap_or(EnvGpuData {
         data: vec![[0.0, 0.0, 0.0, 1.0]],
         width: 1,
@@ -174,6 +187,8 @@ pub fn generate_splats_gpu(
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
     )?;
 
+    pb.inc(1);
+    pb.set_message("create pipeline");
     let descriptor_set_layout = create_splat_descriptor_set_layout(&device)?;
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
@@ -264,6 +279,8 @@ pub fn generate_splats_gpu(
         &env_image,
     );
 
+    pb.inc(1);
+    pb.set_message("dispatch");
     unsafe {
         device.begin_command_buffer(ctx.command_buffer, &vk::CommandBufferBeginInfo::default())?;
 
@@ -291,6 +308,8 @@ pub fn generate_splats_gpu(
         device.queue_wait_idle(ctx.queue)?;
     }
 
+    pb.inc(1);
+    pb.set_message("readback");
     let data = unsafe {
         let ptr = device.map_memory(
             output_buffer.memory,
@@ -323,6 +342,9 @@ pub fn generate_splats_gpu(
         device.unmap_memory(output_buffer.memory);
         result
     };
+
+    pb.inc(1);
+    pb.finish_with_message("splats complete");
 
     unsafe {
         device.destroy_sampler(env_sampler, None);
@@ -760,9 +782,6 @@ vec3 sample_environment(vec3 dir) {
     float u = fract(phi / (2.0 * 3.14159265) + 0.5);
     float v = clamp(theta / 3.14159265, 0.0, 1.0);
     vec3 hdr = texture(env_map, vec2(u, v)).rgb * params.exposure;
-    if (params.tonemap != 0u) {
-        return hdr / (vec3(1.0) + hdr);
-    }
     return hdr;
 }
 
@@ -894,15 +913,6 @@ vec3 trace_path(vec3 origin, vec3 dir, uint seed_base) {
             continue;
         }
 
-        if (depth > 3) {
-            float p = clamp(max_component(weight), 0.05, 0.95);
-            uint seed = seed_base ^ (uint(depth) * 104729u) ^ (prim_id * 12289u);
-            if (rand01(seed) > p) {
-                continue;
-            }
-            weight /= p;
-        }
-
         if (mat.albedo.z > 0.0 && depth < max_reflect && stack_size < MAX_STACK) {
             vec3 refl_dir = reflect_dir(d, normal);
             vec3 refl_origin = offset_origin(hit_pos, normal, refl_dir);
@@ -925,6 +935,52 @@ vec3 trace_path(vec3 origin, vec3 dir, uint seed_base) {
     }
 
     return sample_color;
+}
+
+vec3 shade_surface(vec3 pos, vec3 normal, vec3 view_dir, Material mat, vec3 diffuse_color, uint seed_base) {
+    vec3 incoming_dir = -view_dir;
+    bool is_diffuse_only = mat.albedo.z <= 0.0 && mat.albedo.w <= 0.0;
+
+    float diffuse_intensity = 0.0;
+    float specular_intensity = 0.0;
+
+    if (!is_diffuse_only || params.light_count > 0u) {
+        for (uint li = 0u; li < params.light_count; ++li) {
+            vec3 light_pos = lights[li].xyz;
+            vec3 light_dir = normalize(light_pos - pos);
+            float light_dist = length(light_pos - pos);
+            vec3 shadow_origin = offset_origin(pos, normal, light_dir);
+            float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
+            if (visibility <= 0.0) {
+                continue;
+            }
+
+            diffuse_intensity += max(dot(light_dir, normal), 0.0);
+            if (!is_diffuse_only) {
+                vec3 refl = reflect_dir(-light_dir, normal);
+                specular_intensity += pow(max(dot(-refl, incoming_dir), 0.0), mat.specular_exponent);
+            }
+        }
+    }
+
+    vec3 color = diffuse_color * diffuse_intensity * mat.albedo.x;
+    color += vec3(1.0) * specular_intensity * mat.albedo.y;
+
+    if (!is_diffuse_only) {
+        if (mat.albedo.z > 0.0) {
+            vec3 refl_dir = reflect_dir(incoming_dir, normal);
+            vec3 refl_origin = offset_origin(pos, normal, refl_dir);
+            color += trace_path(refl_origin, refl_dir, seed_base) * mat.albedo.z;
+        }
+
+        if (mat.albedo.w > 0.0) {
+            vec3 refr_dir = refract_dir(incoming_dir, normal, mat.refractive_index, 1.0);
+            vec3 refr_origin = offset_origin(pos, normal, refr_dir);
+            color += trace_path(refr_origin, refr_dir, seed_base) * mat.albedo.w;
+        }
+    }
+
+    return color;
 }
 
 float sh_basis(int index, vec3 dir) {
@@ -1095,16 +1151,16 @@ void main() {
         vec3 local_dir = normalize(vec3(r * cos(theta), r * sin(theta), z));
         vec3 world_dir = normalize(local_dir.x * tangent + local_dir.y * bitangent + local_dir.z * normal);
 
-        vec3 incoming = -world_dir;
+        vec3 view_dir = world_dir;
         uint sample_seed = seed_base ^ (id * 747796405u) ^ (s * 277803737u);
-        vec3 radiance = trace_path(offset_origin(pos, normal, incoming), incoming, sample_seed);
+        vec3 radiance = shade_surface(pos, normal, view_dir, mat, diffuse_color, sample_seed);
         vec3 mapped = (params.tonemap != 0u) ? tonemap_reinhard(radiance) : clamp(radiance, vec3(0.0), vec3(1.0));
         vec3 srgb = linear_to_srgb(mapped);
         vec3 b = srgb - vec3(0.5);
 
         float basis[16];
         for (int i = 0; i < 16; ++i) {
-            basis[i] = sh_basis(i, world_dir);
+            basis[i] = sh_basis(i, view_dir);
         }
 
         for (int i = 0; i < 16; ++i) {
@@ -1149,7 +1205,7 @@ void main() {
         coeffs[i] = vec3(coeff_r[i], coeff_g[i], coeff_b[i]);
     }
 
-    vec3 sh_dc = coeffs[0] / SH_C0;
+    vec3 sh_dc = coeffs[0];
 
     GaussianOut out_g;
     out_g.pos = vec4(pos, 1.0);

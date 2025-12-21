@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::mem;
 
 use ash::vk;
+use indicatif::{ProgressBar, ProgressStyle};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
@@ -45,6 +46,14 @@ struct GpuParams {
 pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn std::error::Error>> {
     let gpu_scene = build_gpu_scene(scene);
     let env = scene.environment.as_ref().map(|env| env.gpu_data());
+
+    let pb = ProgressBar::new(7);
+    pb.set_style(
+        ProgressStyle::with_template("{msg} [{bar:40}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.set_message("upload buffers");
 
     let ctx = VkContext::new()?;
     let device = &ctx.device;
@@ -99,6 +108,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
+    pb.inc(1);
+    pb.set_message("build acceleration");
+
     let (blas, tlas) = ctx.build_acceleration_structures(
         &vertices_buffer,
         &indices_buffer,
@@ -106,6 +118,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         gpu_scene.triangles.len() as u32,
     )?;
 
+    pb.inc(1);
+    pb.set_message("upload environment");
     let env_data = env.unwrap_or(EnvGpuData {
         data: vec![[0.0, 0.0, 0.0, 1.0]],
         width: 1,
@@ -171,6 +185,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         vk::BufferUsageFlags::UNIFORM_BUFFER,
     )?;
 
+    pb.inc(1);
+    pb.set_message("create pipeline");
     let descriptor_set_layout = create_descriptor_set_layout(&device)?;
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
@@ -265,6 +281,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         &env_image,
     );
 
+    pb.inc(1);
+    pb.set_message("dispatch");
     unsafe {
         device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())?;
 
@@ -328,6 +346,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         device.queue_wait_idle(queue)?;
     }
 
+    pb.inc(1);
+    pb.set_message("readback");
     let data = unsafe {
         let ptr = device.map_memory(
             output_buffer.memory,
@@ -347,6 +367,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         device.unmap_memory(output_buffer.memory);
         result
     };
+
+    pb.inc(1);
+    pb.finish_with_message("render complete");
 
     unsafe {
         device.destroy_sampler(env_sampler, None);
@@ -753,9 +776,6 @@ vec3 sample_environment(vec3 dir) {
     float u = fract(phi / (2.0 * 3.14159265) + 0.5);
     float v = clamp(theta / 3.14159265, 0.0, 1.0);
     vec3 hdr = texture(env_map, vec2(u, v)).rgb * params.exposure;
-    if (params.tonemap != 0u) {
-        return hdr / (vec3(1.0) + hdr);
-    }
     return hdr;
 }
 
