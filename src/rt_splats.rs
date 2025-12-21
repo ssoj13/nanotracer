@@ -1340,7 +1340,7 @@ void main() {
         coeffs[i] = vec3(coeff_r[i], coeff_g[i], coeff_b[i]);
     }
 
-    vec3 sh_dc = coeffs[0];
+    vec3 sh_dc = coeffs[0] / SH_C0;
 
     GaussianOut out_g;
     out_g.pos = vec4(pos, 1.0);
