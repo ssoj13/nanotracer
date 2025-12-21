@@ -1,6 +1,7 @@
 pub mod color;
 pub mod environment;
 pub mod geometry;
+pub mod gltf_loader;
 pub mod gpu_scene;
 pub mod material;
 pub mod mesh;

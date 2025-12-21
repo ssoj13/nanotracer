@@ -45,6 +45,8 @@ cargo run --release -- --mesh all -a 4
 | `-x, --exposure F` | HDR exposure (default: 0.1) |
 | `--sky` | Procedural sky gradient |
 | `--mesh TYPE` | Add mesh: cube, pyramid, torus, all |
+| `--glb FILE` | Load glTF/GLB mesh and add to scene |
+| `--glb-scale F` | Scale applied to GLB mesh (default: 1.0) |
 | `--no-floor` | Disable checkerboard plane |
 | `--no-spheres` | Mesh-only mode |
 | `-t, --tonemap` | Apply Reinhard tonemapping |
@@ -52,6 +54,9 @@ cargo run --release -- --mesh all -a 4
 | `--sh-samples N` | SH sample directions per splat (default: 64) |
 | `--sh-glossy-mult F` | SH sample multiplier for glossy/refractive materials (default: 1.5) |
 | `--radiance-clamp F` | Clamp radiance before tonemapping (0 disables, default: 20) |
+| `--light-sampling MODE` | Light sampling: `all` or `one` (default: one) |
+| `--detail-boost F` | Adaptive density boost factor (default: 1.5, 0 disables) |
+| `--detail-boost-max F` | Max adaptive boost (default: 3.0) |
 | `--splat-density F` | Surface samples per unit area (default: 100) |
 | `--splat-scale F` | Override splat scale (auto from density if unset) |
 

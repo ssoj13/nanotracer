@@ -13,6 +13,12 @@ use crate::scene::Scene;
 use crate::splat_gpu::Gaussian;
 use crate::vk_runtime::{AccelResource, BufferResource, ImageResource, VkContext};
 
+#[derive(Clone, Copy, Debug)]
+pub enum LightSampling {
+    All,
+    One,
+}
+
 pub struct SplatConfigGpu {
     pub density: f32,
     pub sh_samples: u32,
@@ -25,6 +31,7 @@ pub struct SplatConfigGpu {
     pub radiance_clamp: f32,
     pub detail_boost: f32,
     pub detail_boost_max: f32,
+    pub light_sampling: LightSampling,
     pub seed: u64,
 }
 
@@ -38,6 +45,7 @@ struct GpuParams {
     reflection_depth: u32,
     refraction_depth: u32,
     light_count: u32,
+    light_sampling: u32,
     use_env: u32,
     use_sky: u32,
     env_width: u32,
@@ -191,6 +199,10 @@ pub fn generate_splats_gpu(
         reflection_depth: config.reflection_depth.max(0) as u32,
         refraction_depth: config.refraction_depth.max(0) as u32,
         light_count: gpu_scene.lights.len() as u32,
+        light_sampling: match config.light_sampling {
+            LightSampling::All => 0,
+            LightSampling::One => 1,
+        },
         use_env: if env_data.use_sky { 0 } else { 1 },
         use_sky: if env_data.use_sky { 1 } else { 0 },
         env_width: env_data.width,
@@ -737,6 +749,7 @@ layout(set = 0, binding = 9) uniform Params {
     uint reflection_depth;
     uint refraction_depth;
     uint light_count;
+    uint light_sampling;
     uint use_env;
     uint use_sky;
     uint env_width;
@@ -1003,20 +1016,40 @@ vec3 shade_surface(vec3 pos, vec3 normal, vec3 view_dir, Material mat, vec3 diff
     float specular_intensity = 0.0;
 
     if (!is_diffuse_only || params.light_count > 0u) {
-        for (uint li = 0u; li < params.light_count; ++li) {
-            vec3 light_pos = lights[li].xyz;
-            vec3 light_dir = normalize(light_pos - pos);
-            float light_dist = length(light_pos - pos);
-            vec3 shadow_origin = offset_origin(pos, normal, light_dir);
-            float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
-            if (visibility <= 0.0) {
-                continue;
-            }
+        if (params.light_count > 0u) {
+            if (params.light_sampling == 0u) {
+                for (uint li = 0u; li < params.light_count; ++li) {
+                    vec3 light_pos = lights[li].xyz;
+                    vec3 light_dir = normalize(light_pos - pos);
+                    float light_dist = length(light_pos - pos);
+                    vec3 shadow_origin = offset_origin(pos, normal, light_dir);
+                    float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
+                    if (visibility <= 0.0) {
+                        continue;
+                    }
 
-            diffuse_intensity += max(dot(light_dir, normal), 0.0);
-            if (!is_diffuse_only) {
-                vec3 refl = reflect_dir(-light_dir, normal);
-                specular_intensity += pow(max(dot(-refl, incoming_dir), 0.0), mat.specular_exponent);
+                    diffuse_intensity += max(dot(light_dir, normal), 0.0);
+                    if (!is_diffuse_only) {
+                        vec3 refl = reflect_dir(-light_dir, normal);
+                        specular_intensity += pow(max(dot(-refl, incoming_dir), 0.0), mat.specular_exponent);
+                    }
+                }
+            } else {
+                uint li = min(uint(rand01(seed_base ^ 0x9e3779b9u) * float(params.light_count)), params.light_count - 1u);
+                float light_weight = float(params.light_count);
+
+                vec3 light_pos = lights[li].xyz;
+                vec3 light_dir = normalize(light_pos - pos);
+                float light_dist = length(light_pos - pos);
+                vec3 shadow_origin = offset_origin(pos, normal, light_dir);
+                float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
+                if (visibility > 0.0) {
+                    diffuse_intensity += max(dot(light_dir, normal), 0.0) * light_weight;
+                    if (!is_diffuse_only) {
+                        vec3 refl = reflect_dir(-light_dir, normal);
+                        specular_intensity += pow(max(dot(-refl, incoming_dir), 0.0), mat.specular_exponent) * light_weight;
+                    }
+                }
             }
         }
     }

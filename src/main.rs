@@ -2,12 +2,13 @@ use clap::Parser;
 use glam::{Quat, Vec3};
 use nanotracer_rs::environment::EnvironmentMap;
 use nanotracer_rs::geometry::Object;
+use nanotracer_rs::gltf_loader::load_glb_mesh;
 use nanotracer_rs::material::{
-    GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MIRROR, RED_RUBBER,
+    GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MATTE_WHITE, MIRROR, RED_RUBBER,
 };
 use nanotracer_rs::mesh::{cube, pyramid, torus, Mesh};
-use nanotracer_rs::rt_renderer::{render, RenderConfig};
-use nanotracer_rs::rt_splats::{generate_splats_gpu, SplatConfigGpu};
+use nanotracer_rs::rt_renderer::{render, LightSampling as RenderLightSampling, RenderConfig};
+use nanotracer_rs::rt_splats::{generate_splats_gpu, LightSampling as SplatLightSampling, SplatConfigGpu};
 use nanotracer_rs::scene::{Light, Scene};
 use nanotracer_rs::splat_gpu::write_ply;
 use nanotracer_rs::utils::save_image;
@@ -94,6 +95,18 @@ struct Args {
     #[arg(long = "radiance-clamp", default_value_t = 20.0)]
     radiance_clamp: f32,
 
+    /// Light sampling: all or one (default: one)
+    #[arg(long = "light-sampling", default_value = "one")]
+    light_sampling: String,
+
+    /// Detail boost factor for adaptive splat density (default: 1.5, 0 disables)
+    #[arg(long = "detail-boost", default_value_t = 1.5)]
+    detail_boost: f32,
+
+    /// Max detail boost factor (default: 3.0)
+    #[arg(long = "detail-boost-max", default_value_t = 3.0)]
+    detail_boost_max: f32,
+
     /// Surface samples per unit area (default: 100)
     #[arg(long = "splat-density", default_value_t = 100.0)]
     splat_density: f32,
@@ -105,6 +118,14 @@ struct Args {
     /// Add mesh primitives: cube, pyramid, torus, all
     #[arg(long = "mesh")]
     mesh: Option<String>,
+
+    /// Load a glTF/GLB mesh and add to the scene
+    #[arg(long = "glb")]
+    glb_path: Option<String>,
+
+    /// Scale applied to the loaded GLB mesh (default: 1.0)
+    #[arg(long = "glb-scale", default_value_t = 1.0)]
+    glb_scale: f32,
 
     /// Disable checkerboard plane
     #[arg(long = "no-floor")]
@@ -155,6 +176,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scene.checkerboard_enabled = false;
     }
 
+    if let Some(glb_path) = &args.glb_path {
+        let mesh_path = std::path::Path::new(glb_path);
+        println!("Loading GLB mesh: {} (scale {})", glb_path, args.glb_scale);
+        match load_glb_mesh(mesh_path, args.glb_scale) {
+            Ok(mesh) => {
+                scene.add_object(Object::mesh(mesh, MATTE_WHITE));
+            }
+            Err(err) => {
+                eprintln!("Warning: Failed to load GLB mesh: {}", err);
+            }
+        }
+    }
+
     let mesh_type = args.mesh.as_deref().unwrap_or("all");
     if mesh_type != "none" || !args.no_spheres {
         add_random_objects(
@@ -179,6 +213,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(splat_path) = &args.splat_output {
         println!("GPU splat generation...");
+        let light_sampling = match args.light_sampling.as_str() {
+            "all" => SplatLightSampling::All,
+            _ => SplatLightSampling::One,
+        };
         let config = SplatConfigGpu {
             density: args.splat_density,
             sh_samples: args.sh_samples,
@@ -189,6 +227,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tonemap: args.tonemap,
             glossy_mult: args.sh_glossy_mult,
             radiance_clamp: args.radiance_clamp,
+            detail_boost: args.detail_boost,
+            detail_boost_max: args.detail_boost_max,
+            light_sampling,
             seed: scene_seed,
         };
         let gaussians = generate_splats_gpu(&scene, &config)?;
@@ -200,6 +241,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("GPU renderer: Vulkan ray query");
         println!("Resolution: {}x{}", WIDTH, HEIGHT);
         println!("AA: {}x{}", args.aa_samples, args.aa_samples);
+        let light_sampling = match args.light_sampling.as_str() {
+            "all" => RenderLightSampling::All,
+            _ => RenderLightSampling::One,
+        };
 
         let config = RenderConfig {
             width: WIDTH as u32,
@@ -210,6 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             reflection_depth: args.reflection_depth,
             refraction_depth: args.refraction_depth,
             tonemap: args.tonemap,
+            light_sampling,
         };
 
         println!("Rendering on GPU...");

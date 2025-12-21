@@ -21,6 +21,13 @@ pub struct RenderConfig {
     pub reflection_depth: i32,
     pub refraction_depth: i32,
     pub tonemap: bool,
+    pub light_sampling: LightSampling,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum LightSampling {
+    All,
+    One,
 }
 
 #[repr(C)]
@@ -33,6 +40,7 @@ struct GpuParams {
     reflection_depth: u32,
     refraction_depth: u32,
     light_count: u32,
+    light_sampling: u32,
     use_env: u32,
     use_sky: u32,
     env_width: u32,
@@ -182,6 +190,10 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         reflection_depth: config.reflection_depth.max(0) as u32,
         refraction_depth: config.refraction_depth.max(0) as u32,
         light_count: gpu_scene.lights.len() as u32,
+        light_sampling: match config.light_sampling {
+            LightSampling::All => 0,
+            LightSampling::One => 1,
+        },
         use_env: if env_data.use_sky { 0 } else { 1 },
         use_sky: if env_data.use_sky { 1 } else { 0 },
         env_width: env_data.width,
@@ -710,6 +722,7 @@ layout(set = 0, binding = 8) uniform Params {
     uint reflection_depth;
     uint refraction_depth;
     uint light_count;
+    uint light_sampling;
     uint use_env;
     uint use_sky;
     uint env_width;
@@ -914,20 +927,41 @@ void main() {
             float diffuse_intensity = 0.0;
             float specular_intensity = 0.0;
 
-            for (uint li = 0u; li < params.light_count; ++li) {
-                vec3 light_pos = lights[li].xyz;
-                vec3 light_dir = normalize(light_pos - hit_pos);
-                float light_dist = length(light_pos - hit_pos);
-                vec3 shadow_origin = offset_origin(hit_pos, normal, light_dir);
-                float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
-                if (visibility <= 0.0) {
-                    continue;
-                }
+            if (params.light_count > 0u) {
+                if (params.light_sampling == 0u) {
+                    for (uint li = 0u; li < params.light_count; ++li) {
+                        vec3 light_pos = lights[li].xyz;
+                        vec3 light_dir = normalize(light_pos - hit_pos);
+                        float light_dist = length(light_pos - hit_pos);
+                        vec3 shadow_origin = offset_origin(hit_pos, normal, light_dir);
+                        float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
+                        if (visibility <= 0.0) {
+                            continue;
+                        }
 
-                diffuse_intensity += max(dot(light_dir, normal), 0.0);
-                if (mat.albedo.y > 0.0) {
-                    vec3 refl = reflect_dir(-light_dir, normal);
-                    specular_intensity += pow(max(dot(-refl, dir), 0.0), mat.specular_exponent);
+                        diffuse_intensity += max(dot(light_dir, normal), 0.0);
+                        if (mat.albedo.y > 0.0) {
+                            vec3 refl = reflect_dir(-light_dir, normal);
+                            specular_intensity += pow(max(dot(-refl, dir), 0.0), mat.specular_exponent);
+                        }
+                    }
+                } else {
+                    uint seed = gid.x * 1973u + gid.y * 9277u + s * 26699u + uint(depth) * 104729u;
+                    uint li = min(uint(rand01(seed) * float(params.light_count)), params.light_count - 1u);
+                    float light_weight = float(params.light_count);
+
+                    vec3 light_pos = lights[li].xyz;
+                    vec3 light_dir = normalize(light_pos - hit_pos);
+                    float light_dist = length(light_pos - hit_pos);
+                    vec3 shadow_origin = offset_origin(hit_pos, normal, light_dir);
+                    float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
+                    if (visibility > 0.0) {
+                        diffuse_intensity += max(dot(light_dir, normal), 0.0) * light_weight;
+                        if (mat.albedo.y > 0.0) {
+                            vec3 refl = reflect_dir(-light_dir, normal);
+                            specular_intensity += pow(max(dot(-refl, dir), 0.0), mat.specular_exponent) * light_weight;
+                        }
+                    }
                 }
             }
 

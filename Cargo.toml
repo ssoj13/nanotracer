@@ -15,3 +15,4 @@ ash = "0.38"
 shaderc = "0.9"
 bytemuck = { version = "1.16", features = ["derive"] }
 indicatif = "0.17"
+gltf = "1.4"
