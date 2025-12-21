@@ -56,11 +56,20 @@ impl GpuMaterial {
 }
 
 pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
+    build_gpu_scene_with_detail_boost(scene, 1.5, 3.0)
+}
+
+pub fn build_gpu_scene_with_detail_boost(
+    scene: &Scene,
+    detail_boost: f32,
+    max_boost: f32,
+) -> GpuSceneData {
     let mut vertices: Vec<[f32; 4]> = Vec::new();
     let mut normals: Vec<[f32; 4]> = Vec::new();
     let mut triangles: Vec<GpuTriangle> = Vec::new();
     let mut tri_materials: Vec<u32> = Vec::new();
     let mut tri_areas: Vec<f32> = Vec::new();
+    let mut tri_weights: Vec<f32> = Vec::new();
     let mut materials: Vec<GpuMaterial> = Vec::new();
 
     for object in &scene.objects {
@@ -78,6 +87,9 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
                     &mut triangles,
                     &mut tri_materials,
                     &mut tri_areas,
+                    detail_boost,
+                    max_boost,
+                    &mut tri_weights,
                 );
             }
             Geometry::Mesh(mesh) => {
@@ -89,6 +101,9 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
                     &mut triangles,
                     &mut tri_materials,
                     &mut tri_areas,
+                    detail_boost,
+                    max_boost,
+                    &mut tri_weights,
                 );
             }
         }
@@ -110,6 +125,9 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
             &mut triangles,
             &mut tri_materials,
             &mut tri_areas,
+            detail_boost,
+            max_boost,
+            &mut tri_weights,
         );
     }
 
@@ -119,12 +137,12 @@ pub fn build_gpu_scene(scene: &Scene) -> GpuSceneData {
         .map(|l| [l.position.x, l.position.y, l.position.z, 1.0])
         .collect::<Vec<_>>();
 
-    let mut tri_cdf = Vec::with_capacity(tri_areas.len());
-    let total_area: f32 = tri_areas.iter().sum();
+    let mut tri_cdf = Vec::with_capacity(tri_weights.len());
+    let total_weight: f32 = tri_weights.iter().sum();
     let mut accum = 0.0f32;
-    if total_area > 0.0 {
-        for area in &tri_areas {
-            accum += *area / total_area;
+    if total_weight > 0.0 {
+        for weight in &tri_weights {
+            accum += *weight / total_weight;
             tri_cdf.push(accum);
         }
     }
@@ -149,9 +167,13 @@ fn append_mesh(
     triangles: &mut Vec<GpuTriangle>,
     tri_materials: &mut Vec<u32>,
     tri_areas: &mut Vec<f32>,
+    detail_boost: f32,
+    max_boost: f32,
+    tri_weights: &mut Vec<f32>,
 ) {
     let base = vertices.len() as u32;
     vertices.extend(mesh.vertices.iter().map(|v| [v.x, v.y, v.z, 1.0]));
+    let has_normals = mesh.normals.len() == mesh.vertices.len();
     if mesh.normals.len() == mesh.vertices.len() {
         normals.extend(mesh.normals.iter().map(|n| [n.x, n.y, n.z, 0.0]));
     } else {
@@ -169,8 +191,24 @@ fn append_mesh(
         let v0 = mesh.vertices[tri[0] as usize];
         let v1 = mesh.vertices[tri[1] as usize];
         let v2 = mesh.vertices[tri[2] as usize];
-        let area = (v1 - v0).cross(v2 - v0).length() * 0.5;
+        let face_vec = (v1 - v0).cross(v2 - v0);
+        let area = face_vec.length() * 0.5;
         tri_areas.push(area.max(0.0));
+
+        let mut weight = area.max(0.0);
+        if has_normals && weight > 0.0 {
+            let face_n = face_vec.normalize();
+            let n0 = mesh.normals[tri[0] as usize].normalize_or_zero();
+            let n1 = mesh.normals[tri[1] as usize].normalize_or_zero();
+            let n2 = mesh.normals[tri[2] as usize].normalize_or_zero();
+            let v0 = 1.0 - face_n.dot(n0).abs();
+            let v1 = 1.0 - face_n.dot(n1).abs();
+            let v2 = 1.0 - face_n.dot(n2).abs();
+            let variance = (v0 + v1 + v2) / 3.0;
+            let boost = (1.0 + variance * detail_boost).clamp(0.5, max_boost);
+            weight *= boost;
+        }
+        tri_weights.push(weight.max(0.0));
     }
 }
 

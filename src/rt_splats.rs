@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 use std::mem;
+use std::time::Instant;
 
 use ash::vk;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -7,7 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
 use crate::environment::EnvGpuData;
-use crate::gpu_scene::build_gpu_scene;
+use crate::gpu_scene::build_gpu_scene_with_detail_boost;
 use crate::scene::Scene;
 use crate::splat_gpu::Gaussian;
 use crate::vk_runtime::{AccelResource, BufferResource, ImageResource, VkContext};
@@ -22,6 +23,8 @@ pub struct SplatConfigGpu {
     pub tonemap: bool,
     pub glossy_mult: f32,
     pub radiance_clamp: f32,
+    pub detail_boost: f32,
+    pub detail_boost_max: f32,
     pub seed: u64,
 }
 
@@ -63,7 +66,11 @@ pub fn generate_splats_gpu(
     scene: &Scene,
     config: &SplatConfigGpu,
 ) -> Result<Vec<Gaussian>, Box<dyn std::error::Error>> {
-    let gpu_scene = build_gpu_scene(scene);
+    let gpu_scene = build_gpu_scene_with_detail_boost(
+        scene,
+        config.detail_boost,
+        config.detail_boost_max,
+    );
     let env = scene.environment.as_ref().map(|env| env.gpu_data());
 
     let pb = ProgressBar::new(7);
@@ -73,6 +80,9 @@ pub fn generate_splats_gpu(
             .progress_chars("=>-"),
     );
     pb.set_message("upload buffers");
+
+    let total_start = Instant::now();
+    let mut phase_start = Instant::now();
 
     let total_area: f32 = gpu_scene.tri_areas.iter().sum();
     if total_area <= 0.0 {
@@ -124,6 +134,9 @@ pub fn generate_splats_gpu(
 
     let cdf_buffer = ctx.create_buffer_with_data(&gpu_scene.tri_cdf, vk::BufferUsageFlags::STORAGE_BUFFER)?;
 
+    let t_buffers = phase_start.elapsed();
+    phase_start = Instant::now();
+
     pb.inc(1);
     pb.set_message("build acceleration");
     let (blas, tlas) = ctx.build_acceleration_structures(
@@ -132,6 +145,9 @@ pub fn generate_splats_gpu(
         gpu_scene.vertices.len() as u32,
         gpu_scene.triangles.len() as u32,
     )?;
+
+    let t_accel = phase_start.elapsed();
+    phase_start = Instant::now();
 
     pb.inc(1);
     pb.set_message("upload environment");
@@ -163,6 +179,9 @@ pub fn generate_splats_gpu(
             None,
         )?
     };
+
+    let t_env = phase_start.elapsed();
+    phase_start = Instant::now();
 
     let params = GpuParams {
         sample_count,
@@ -285,6 +304,9 @@ pub fn generate_splats_gpu(
         &env_image,
     );
 
+    let t_pipeline = phase_start.elapsed();
+    phase_start = Instant::now();
+
     pb.inc(1);
     pb.set_message("dispatch");
     unsafe {
@@ -313,6 +335,9 @@ pub fn generate_splats_gpu(
         device.queue_submit(ctx.queue, &[submit_info], vk::Fence::null())?;
         device.queue_wait_idle(ctx.queue)?;
     }
+
+    let t_dispatch = phase_start.elapsed();
+    phase_start = Instant::now();
 
     pb.inc(1);
     pb.set_message("readback");
@@ -351,6 +376,19 @@ pub fn generate_splats_gpu(
 
     pb.inc(1);
     pb.finish_with_message("splats complete");
+
+    let t_readback = phase_start.elapsed();
+    let t_total = total_start.elapsed();
+    println!(
+        "Timing (GPU splats): buffers {:.2}s, accel {:.2}s, env {:.2}s, pipeline {:.2}s, dispatch {:.2}s, readback {:.2}s, total {:.2}s",
+        t_buffers.as_secs_f32(),
+        t_accel.as_secs_f32(),
+        t_env.as_secs_f32(),
+        t_pipeline.as_secs_f32(),
+        t_dispatch.as_secs_f32(),
+        t_readback.as_secs_f32(),
+        t_total.as_secs_f32()
+    );
 
     unsafe {
         device.destroy_sampler(env_sampler, None);
@@ -1162,16 +1200,16 @@ void main() {
         }
     }
 
-    uint sh_samples = params.sh_samples;
+    uint base_samples = max(params.sh_samples, 1u);
+    uint glossy_samples = 0u;
     float glossy_mult = max(params.glossy_mult, 1.0);
     if (mat.albedo.z > 0.0 || mat.albedo.w > 0.0) {
-        sh_samples = uint(float(params.sh_samples) * glossy_mult);
+        glossy_samples = uint(float(base_samples) * max(glossy_mult - 1.0, 0.0));
     }
-    sh_samples = max(sh_samples, 1u);
 
     uint dir_seed = seed_base ^ (id * 1597334677u);
-    for (uint s = 0u; s < sh_samples; ++s) {
-        vec3 local_dir = sample_uniform_hemisphere(dir_seed, s, sh_samples);
+    for (uint s = 0u; s < base_samples; ++s) {
+        vec3 local_dir = sample_uniform_hemisphere(dir_seed, s, base_samples);
         vec3 world_dir = normalize(local_dir.x * tangent + local_dir.y * bitangent + local_dir.z * normal);
 
         vec3 view_dir = world_dir;
@@ -1197,6 +1235,40 @@ void main() {
             atb[i] += basis[i] * b;
             for (int j = 0; j < 16; ++j) {
                 ata[i][j] += basis[i] * basis[j];
+            }
+        }
+    }
+
+    if (glossy_samples > 0u) {
+        uint glossy_seed = dir_seed ^ 0x9e3779b9u;
+        for (uint s = 0u; s < glossy_samples; ++s) {
+            vec3 local_dir = sample_uniform_hemisphere(glossy_seed, s, glossy_samples);
+            vec3 world_dir = normalize(local_dir.x * tangent + local_dir.y * bitangent + local_dir.z * normal);
+
+            vec3 view_dir = world_dir;
+            uint sample_seed = seed_base ^ (id * 747796405u) ^ ((s + base_samples) * 277803737u);
+            vec3 radiance = shade_surface(pos, normal, view_dir, mat, diffuse_color, sample_seed);
+            float clamp_val = max(params.radiance_clamp, 0.0);
+            if (clamp_val > 0.0) {
+                float luma = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+                if (luma > clamp_val) {
+                    radiance *= clamp_val / luma;
+                }
+            }
+            vec3 mapped = (params.tonemap != 0u) ? tonemap_reinhard(radiance) : clamp(radiance, vec3(0.0), vec3(1.0));
+            vec3 srgb = linear_to_srgb(mapped);
+            vec3 b = srgb - vec3(0.5);
+
+            float basis[16];
+            for (int i = 0; i < 16; ++i) {
+                basis[i] = sh_basis(i, view_dir);
+            }
+
+            for (int i = 0; i < 16; ++i) {
+                atb[i] += basis[i] * b;
+                for (int j = 0; j < 16; ++j) {
+                    ata[i][j] += basis[i] * basis[j];
+                }
             }
         }
     }

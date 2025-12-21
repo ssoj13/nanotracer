@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 use std::mem;
+use std::time::Instant;
 
 use ash::vk;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -55,6 +56,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
     );
     pb.set_message("upload buffers");
 
+    let total_start = Instant::now();
+    let mut phase_start = Instant::now();
+
     let ctx = VkContext::new()?;
     let device = &ctx.device;
     let command_buffer = ctx.command_buffer;
@@ -108,6 +112,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
+    let t_buffers = phase_start.elapsed();
+    phase_start = Instant::now();
+
     pb.inc(1);
     pb.set_message("build acceleration");
 
@@ -117,6 +124,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         gpu_scene.vertices.len() as u32,
         gpu_scene.triangles.len() as u32,
     )?;
+
+    let t_accel = phase_start.elapsed();
+    phase_start = Instant::now();
 
     pb.inc(1);
     pb.set_message("upload environment");
@@ -148,6 +158,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
             None,
         )?
     };
+
+    let t_env = phase_start.elapsed();
+    phase_start = Instant::now();
 
     let output_image = ctx.create_storage_image(
         config.width,
@@ -281,6 +294,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         &env_image,
     );
 
+    let t_pipeline = phase_start.elapsed();
+    phase_start = Instant::now();
+
     pb.inc(1);
     pb.set_message("dispatch");
     unsafe {
@@ -346,6 +362,9 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         device.queue_wait_idle(queue)?;
     }
 
+    let t_dispatch = phase_start.elapsed();
+    phase_start = Instant::now();
+
     pb.inc(1);
     pb.set_message("readback");
     let data = unsafe {
@@ -370,6 +389,19 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
 
     pb.inc(1);
     pb.finish_with_message("render complete");
+
+    let t_readback = phase_start.elapsed();
+    let t_total = total_start.elapsed();
+    println!(
+        "Timing (GPU render): buffers {:.2}s, accel {:.2}s, env {:.2}s, pipeline {:.2}s, dispatch {:.2}s, readback {:.2}s, total {:.2}s",
+        t_buffers.as_secs_f32(),
+        t_accel.as_secs_f32(),
+        t_env.as_secs_f32(),
+        t_pipeline.as_secs_f32(),
+        t_dispatch.as_secs_f32(),
+        t_readback.as_secs_f32(),
+        t_total.as_secs_f32()
+    );
 
     unsafe {
         device.destroy_sampler(env_sampler, None);
