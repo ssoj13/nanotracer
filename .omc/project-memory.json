@@ -69,16 +69,16 @@
   },
   "hotPaths": [
     {
+      "path": "crates\\nano-render\\src\\renderer.rs",
+      "accessCount": 20,
+      "lastAccessed": 1778875988569,
+      "type": "file"
+    },
+    {
       "path": "src",
       "accessCount": 11,
       "lastAccessed": 1778865352817,
       "type": "directory"
-    },
-    {
-      "path": "crates\\nano-render\\src\\renderer.rs",
-      "accessCount": 11,
-      "lastAccessed": 1778873916027,
-      "type": "file"
     },
     {
       "path": "src\\main.rs",
@@ -100,26 +100,38 @@
     },
     {
       "path": "crates\\nano-gpu\\src\\gpu_scene.rs",
-      "accessCount": 5,
-      "lastAccessed": 1778868179120,
+      "accessCount": 7,
+      "lastAccessed": 1778875460739,
       "type": "file"
     },
     {
       "path": "README.md",
+      "accessCount": 6,
+      "lastAccessed": 1778876181292,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\environment.rs",
       "accessCount": 5,
-      "lastAccessed": 1778874071683,
+      "lastAccessed": 1778876115729,
+      "type": "file"
+    },
+    {
+      "path": "todo.md",
+      "accessCount": 5,
+      "lastAccessed": 1778876164733,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-shaders\\src\\lib.rs",
+      "accessCount": 4,
+      "lastAccessed": 1778875913053,
       "type": "file"
     },
     {
       "path": "crates\\nano-core\\src\\material.rs",
       "accessCount": 3,
       "lastAccessed": 1778873877626,
-      "type": "file"
-    },
-    {
-      "path": "todo.md",
-      "accessCount": 3,
-      "lastAccessed": 1778874078762,
       "type": "file"
     },
     {
@@ -162,12 +174,6 @@
       "path": "crates\\nano-core\\src\\scene.rs",
       "accessCount": 2,
       "lastAccessed": 1778866134334,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-core\\src\\environment.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778866166560,
       "type": "file"
     },
     {
@@ -354,12 +360,6 @@
       "path": "crates\\nano-gpu\\src\\lib.rs",
       "accessCount": 1,
       "lastAccessed": 1778866212429,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-shaders\\src\\lib.rs",
-      "accessCount": 1,
-      "lastAccessed": 1778866279888,
       "type": "file"
     },
     {

@@ -40,6 +40,19 @@ const float EPS = 2e-3;
 const int MAX_STACK = 16;
 const float PI = 3.14159265;
 
+// Real SH basis constants — Condon–Shortley phase, matching the
+// graphdeco-inria 3DGS convention. Keep in sync with `nano_core::sh` if
+// any value changes; existing 3DGS viewers depend on this exact set.
+const float SH_C0 = 0.2820948;
+const float SH_C1 = 0.488602;
+const float SH_C2[5] = float[5](
+     1.0925485, -1.0925485, 0.31539157, -1.0925485, 0.54627424
+);
+const float SH_C3[7] = float[7](
+    -0.5900436, 2.8906114, -0.4570458, 0.37317634,
+    -0.4570458, 1.4453057, -0.5900436
+);
+
 uint wang_hash(uint seed) {
     seed = (seed ^ 61u) ^ (seed >> 16u);
     seed *= 9u;
@@ -108,6 +121,34 @@ vec3 linear_to_srgb(vec3 linear) {
     vec3 cutoff = vec3(0.0031308);
     return mix(high, low, lessThanEqual(v, cutoff));
 }
+
+// Convert legacy Phong exponent n to GGX roughness α (Walter 2007).
+// n = 10 → α ≈ 0.41 (rough),  n = 1500 → α ≈ 0.04 (near-mirror).
+float phong_to_alpha(float n) {
+    return sqrt(2.0 / max(n + 2.0, 2.0));
+}
+
+// GGX/Trowbridge–Reitz specular BRDF × cos(θ_L) — the per-light radiance
+// contribution that adds directly to the outgoing radiance once you
+// multiply by L_in. `f0` is the per-material Schlick base reflectance
+// (= mat.albedo.y in nano-core::material's energy-conserving layout).
+float ggx_specular(vec3 n, vec3 v, vec3 l, float alpha, float f0) {
+    float NdotL = max(dot(n, l), 0.0);
+    if (NdotL <= 0.0) return 0.0;
+    vec3 h = normalize(v + l);
+    float NdotV = max(dot(n, v), 1e-3);
+    float NdotH = max(dot(n, h), 0.0);
+    float VdotH = max(dot(v, h), 0.0);
+    float a2 = alpha * alpha;
+    float d_denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    float D = a2 / (PI * d_denom * d_denom);
+    float k = alpha * 0.5;
+    float gv = NdotV / (NdotV * (1.0 - k) + k);
+    float gl = NdotL / (NdotL * (1.0 - k) + k);
+    float G = gv * gl;
+    float F = f0 + (1.0 - f0) * pow(1.0 - VdotH, 5.0);
+    return (D * F * G) / (4.0 * NdotV);
+}
 "#;
 
 /// GLSL fragment placed *after* per-shader bindings.
@@ -155,6 +196,31 @@ float shadow_ray(vec3 origin, vec3 dir, float dist) {
         return 1.0;
     }
     return 0.0;
+}
+
+// Evaluate the Lambertian-convolved env irradiance at surface normal `n`.
+// The 9 SH coefficients in `params.irradiance_sh` were pre-convolved on the
+// CPU (see nano_core::environment::irradiance_sh — Ramamoorthi–Hanrahan).
+// Returns radiance in the same units as direct-light contributions, ready
+// to multiply by `kd * diffuse_color` and add to the lit term.
+vec3 eval_env_irradiance(vec3 n) {
+    float x = n.x;
+    float y = n.y;
+    float z = n.z;
+    float xx = x * x;
+    float yy = y * y;
+    float zz = z * z;
+    vec3 c =
+          params.irradiance_sh[0].rgb *  SH_C0
+        + params.irradiance_sh[1].rgb * (-SH_C1 * y)
+        + params.irradiance_sh[2].rgb * ( SH_C1 * z)
+        + params.irradiance_sh[3].rgb * (-SH_C1 * x)
+        + params.irradiance_sh[4].rgb * (SH_C2[0] * x * y)
+        + params.irradiance_sh[5].rgb * (SH_C2[1] * y * z)
+        + params.irradiance_sh[6].rgb * (SH_C2[2] * (2.0 * zz - xx - yy))
+        + params.irradiance_sh[7].rgb * (SH_C2[3] * x * z)
+        + params.irradiance_sh[8].rgb * (SH_C2[4] * (xx - yy));
+    return max(c, vec3(0.0));
 }
 "#;
 

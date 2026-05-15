@@ -198,15 +198,21 @@ fn append_mesh(
 
         let mut weight = area.max(0.0);
         if has_normals && weight > 0.0 {
-            let face_n = face_vec.normalize();
+            // Curvature estimate: pairwise vertex-normal disagreement is
+            // larger when the triangle bends sharply between its corners.
+            // `1 - n_i · n_j` is 0 on a flat triangle, 1 at a 90° crease,
+            // 2 at a fold — `max` over the three pairs picks up edges that
+            // bend even if the other pair is flat. This catches "rough"
+            // regions of a smoothed mesh better than the old face/vertex
+            // delta which always reads 0 on convex-only spheres.
             let n0 = mesh.normals[tri[0] as usize].normalize_or_zero();
             let n1 = mesh.normals[tri[1] as usize].normalize_or_zero();
             let n2 = mesh.normals[tri[2] as usize].normalize_or_zero();
-            let v0 = 1.0 - face_n.dot(n0).abs();
-            let v1 = 1.0 - face_n.dot(n1).abs();
-            let v2 = 1.0 - face_n.dot(n2).abs();
-            let variance = (v0 + v1 + v2) / 3.0;
-            let boost = (1.0 + variance * detail_boost).clamp(0.5, max_boost);
+            let d01 = 1.0 - n0.dot(n1).clamp(-1.0, 1.0);
+            let d02 = 1.0 - n0.dot(n2).clamp(-1.0, 1.0);
+            let d12 = 1.0 - n1.dot(n2).clamp(-1.0, 1.0);
+            let curvature = d01.max(d02).max(d12);
+            let boost = (1.0 + curvature * detail_boost).clamp(0.5, max_boost);
             weight *= boost;
         }
         tri_weights.push(weight.max(0.0));

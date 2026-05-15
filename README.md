@@ -108,27 +108,39 @@ GPU: NVIDIA GeForce RTX 3080 Ti (12288 MiB VRAM, 10533 MiB free)
 | `--splat-scale F` | Override splat radius (auto from density when unset) |
 | `--sh-keep-glossy` | Keep view-dependent SH on mirror/glass (off by default — DC fallback prevents the order-3-SH "rainbow" ringing) |
 
+## Shading model
+
+Both the image renderer and the splat fitter run the same shading code:
+
+- **Diffuse** is Lambertian (`kd * diffuse_color * (N·L)` per light).
+- **Specular** is GGX / Trowbridge–Reitz microfacet BRDF with Smith
+  geometry and Schlick Fresnel (`f0 = ks`). Legacy `specular_exponent`
+  is mapped to GGX roughness via `α = √(2/(n+2))`.
+- **Reflection / refraction** rays are weighted by `kr` / `kt`. For
+  dielectric materials with both > 0 (e.g. `GLASS`) a per-hit Schlick
+  Fresnel rebalances the split — at grazing angles `kr` rises toward 1
+  and the surface becomes mirror-like.
+- **IBL diffuse** comes from a pre-convolved degree-2 SH of the env
+  (Ramamoorthi–Hanrahan band factors `A_0=π, A_1=2π/3, A_2=π/4`).
+  The 9 vec4 coefficients sit in the Params UBO and evaluate per
+  surface normal at shade time.
+
 ## Materials
 
 All material constants are energy-conserving (`kd + kr + kt ≤ 1`) with
 albedo channels `[kd, ks, kr, kt]` — see `crates/nano-core/src/material.rs`.
 
-`ks` is the **integrated** energy of the specular lobe — both shaders
-apply normalised Phong `(n+2)/(2π)`, so `ks` does not need to scale with
-`specular_exponent`. For dielectrics, `ks ≈ F₀ ≈ 0.04`.
+`ks` is Fresnel F₀ for the GGX BRDF (≈ 0.04 for typical dielectrics).
+The BRDF already absorbs F₀, so changing `specular_exponent` (now mapped
+to GGX α) reshapes the lobe but not its integrated energy.
 
-| Material | kd | ks | kr | kt | n | Look |
+| Material | kd | ks (F₀) | kr | kt | n → α | Look |
 |---|---|---|---|---|---|---|
-| `IVORY` | 0.85 | 0.04 | 0.10 | 0.00 | 50 | Warm off-white, soft highlight |
-| `GLASS` | 0.00 | 0.04 | 0.10 | 0.85 | 300 | Fresnel-blended dielectric |
-| `RED_RUBBER` | 0.90 | 0.04 | 0.00 | 0.00 | 10 | Saturated matte red |
-| `MIRROR` | 0.00 | 0.04 | 0.96 | 0.00 | 1500 | Near-perfect metallic mirror |
-| `MATTE_*` | 0.95 | 0.04 | 0.00 | 0.00 | 20 | Pure matte family |
-
-Materials with both `kr > 0` and `kt > 0` (i.e. dielectrics like `GLASS`)
-get a **Schlick-Fresnel rebalance** at runtime: `F = F₀ + (1-F₀)(1-cosθ)⁵`
-scales reflection up at grazing angles, so glass becomes mirror-like at
-edges. Pure mirrors (`kt = 0`) skip the rebalance.
+| `IVORY` | 0.85 | 0.04 | 0.10 | 0.00 | 50 → 0.20 | Warm off-white, soft highlight |
+| `GLASS` | 0.00 | 0.04 | 0.10 | 0.85 | 300 → 0.082 | Fresnel-blended dielectric |
+| `RED_RUBBER` | 0.90 | 0.04 | 0.00 | 0.00 | 10 → 0.41 | Saturated matte red |
+| `MIRROR` | 0.00 | 0.04 | 0.96 | 0.00 | 1500 → 0.037 | Near-perfect metallic mirror |
+| `MATTE_*` | 0.95 | 0.04 | 0.00 | 0.00 | 20 → 0.30 | Pure matte family |
 
 ## Splat-fit notes
 

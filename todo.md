@@ -25,12 +25,26 @@ prune as they age.
 
 ## Done in 2026-05 wave (cont.)
 
-- [x] Normalised Phong specular `(n+2)/(2π)` in both shaders. Materials
-      rebalanced so `ks ≈ F₀ ≈ 0.04` (energy-as-stored).
+- [x] Normalised Phong specular `(n+2)/(2π)` (subsequently superseded
+      by GGX — see below). Materials rebalanced so `ks ≈ F₀ ≈ 0.04`.
 - [x] `--sh-keep-glossy` CLI flag wired through `SplatConfigGpu` and the
       splat shader uniform block.
 - [x] Schlick Fresnel reflection/refraction split for dielectric
       materials (`kr > 0 && kt > 0`), e.g. `GLASS`.
+- [x] Truncate diffuse-only splats to degree-1 SH (higher bands are
+      noise for Lambertian; cleaner fit).
+- [x] Curvature-aware detail boost using pairwise vertex-normal
+      disagreement (`max(1 - n_i·n_j)`) — catches creases the old
+      face/vertex delta missed.
+- [x] Progress bar split: 8 phases — `upload buffers` / `build accel` /
+      `upload env` / `compile shader` / `create pipeline` /
+      `write descriptors` / `dispatch` / `readback`.
+- [x] GGX / Trowbridge–Reitz microfacet specular replaces Phong in both
+      shaders (`phong_to_alpha(n)` mapping for back-compat). Smith
+      geometry + Schlick Fresnel absorbed into the BRDF.
+- [x] IBL diffuse via degree-2 SH env-irradiance pre-convolved on CPU
+      (Ramamoorthi–Hanrahan band factors). Uploaded as `vec4[9]` in the
+      Params UBO and evaluated at the surface normal in both shaders.
 
 ## Active
 
@@ -38,29 +52,23 @@ _nothing in flight — pick from the parked list below_
 
 ## 🟧 Visible improvements
 
+_(empty — all landed)_
+
 ## 🟨 Polish
 
-- [ ] Spawn a coarser SH (degree 1) variant for surfaces flagged
-      "mostly diffuse" — saves storage and DC quality stays the same.
-- [ ] Detail-boost heuristic in `gpu_scene::append_mesh` is currently
-      a one-shot variance gauge — try a curvature-aware variant once
-      we have measured timings.
-- [ ] Progress bar fidelity: separate buffer-upload vs AS-build vs
-      pipeline-build steps when timings are wildly different.
+_(empty — all landed)_
 
 ## 🟩 Long horizon
 
-- [ ] Full PBR (GGX / Cook–Torrance + multi-scattering compensation).
-      Big shader rewrite — pencilled for when materials need texturing
-      support too.
-- [ ] Real environment SH convolution per splat instead of "DC only"
-      for reflective/refractive — captures average env reflection
-      without per-direction ringing.
+- [ ] Multi-scattering compensation for GGX (Heitz / Hill) — current
+      single-scatter BRDF is a touch dim at high roughness.
+- [ ] Per-roughness env-map mip chain for IBL specular (split-sum
+      approximation à la Real Shading in UE4). Today only IBL **diffuse**
+      is wired; specular reflections still come from `trace_path`.
 - [ ] `wgpu` migration. Blocked on RT extension stabilising; see
       `WGPU_RESEARCH.md` for the unblock criteria.
-- [ ] `no-std` Rust subset for ARM SBC targets — moved here from the
-      previous freeform note. Path: lift `nano-core` to `#![no_std]`,
-      keep `nano-gpu`/`nano-shaders` host-only.
+- [ ] `no-std` Rust subset for ARM SBC targets. Path: lift `nano-core`
+      to `#![no_std]`, keep `nano-gpu`/`nano-shaders` host-only.
 
 ## Parked questions
 

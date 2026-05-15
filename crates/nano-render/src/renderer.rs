@@ -44,13 +44,17 @@ struct GpuParams {
     fov: f32,
     _pad0: u32,
     _pad1: u32,
+    /// Lambertian-convolved env irradiance (degree-2 SH, 9 vec4 entries).
+    /// xyz is RGB, w unused — pre-convolved on CPU by
+    /// `nano_core::environment::EnvironmentMap::irradiance_sh`.
+    irradiance_sh: [[f32; 4]; 9],
 }
 
 pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn std::error::Error>> {
     let gpu_scene = build_gpu_scene(scene);
     let env = scene.environment.as_ref().map(|env| env.gpu_data());
 
-    let pb = ProgressBar::new(7);
+    let pb = ProgressBar::new(8);
     pb.set_style(
         ProgressStyle::with_template("{msg} [{bar:40}] {pos}/{len}")
             .unwrap()
@@ -138,6 +142,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         height: 1,
         exposure: 1.0,
         use_sky: true,
+        irradiance_sh: [[0.0; 4]; 9],
     });
 
     let env_image = ctx.create_image_with_data(
@@ -194,6 +199,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         fov: config.fov,
         _pad0: 0,
         _pad1: 0,
+        irradiance_sh: env_data.irradiance_sh,
     };
 
     let params_buffer = ctx.create_buffer_with_data(
@@ -215,6 +221,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         )?
     };
 
+    pb.inc(1);
+    pb.set_message("compile shader");
     let shader_src = nano_shaders::assemble(RENDERER_BINDINGS, RENDERER_BODY);
     let shader_module = ctx.create_shader_module(&shader_src, "ray_query.comp")?;
 
@@ -282,6 +290,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         })?
     }[0];
 
+    pb.inc(1);
+    pb.set_message("write descriptors");
     write_descriptor_set(
         device,
         descriptor_set,
@@ -715,6 +725,7 @@ layout(set = 0, binding = 8) uniform Params {
     float fov;
     uint _pad0;
     uint _pad1;
+    vec4 irradiance_sh[9];
 } params;
 layout(set = 0, binding = 9) uniform sampler2D env_map;
 "#;
@@ -812,6 +823,10 @@ void main() {
             float diffuse_intensity = 0.0;
             float specular_intensity = 0.0;
 
+            // GGX setup: roughness from Phong exponent, Fresnel F0 from ks.
+            float alpha_ggx = phong_to_alpha(mat.specular_exponent);
+            vec3 view = -dir;
+
             if (params.light_count > 0u) {
                 if (params.light_sampling == 0u) {
                     for (uint li = 0u; li < params.light_count; ++li) {
@@ -824,10 +839,7 @@ void main() {
                             continue;
                         }
                         diffuse_intensity += max(dot(light_dir, normal), 0.0);
-                        if (mat.albedo.y > 0.0) {
-                            vec3 refl = reflect_dir(-light_dir, normal);
-                            specular_intensity += pow(max(dot(-refl, dir), 0.0), mat.specular_exponent);
-                        }
+                        specular_intensity += ggx_specular(normal, view, light_dir, alpha_ggx, mat.albedo.y);
                     }
                 } else {
                     uint seed = gid.x * 1973u + gid.y * 9277u + s * 26699u + uint(depth) * 104729u;
@@ -841,18 +853,17 @@ void main() {
                     float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
                     if (visibility > 0.0) {
                         diffuse_intensity += max(dot(light_dir, normal), 0.0) * light_weight;
-                        if (mat.albedo.y > 0.0) {
-                            vec3 refl = reflect_dir(-light_dir, normal);
-                            specular_intensity += pow(max(dot(-refl, dir), 0.0), mat.specular_exponent) * light_weight;
-                        }
+                        specular_intensity += ggx_specular(normal, view, light_dir, alpha_ggx, mat.albedo.y) * light_weight;
                     }
                 }
             }
 
-            // Normalised Phong: integrated lobe energy = ks regardless of n.
-            float spec_norm = (mat.specular_exponent + 2.0) / (2.0 * PI);
-            vec3 local_color = diffuse_color * diffuse_intensity * mat.albedo.x;
-            local_color += vec3(1.0) * specular_intensity * mat.albedo.y * spec_norm;
+            // GGX already absorbs Fresnel F0 — no separate ks/spec_norm needed.
+            // Add IBL diffuse (cosine-convolved env SH) so surfaces are not
+            // pitch-black where direct lights don't reach.
+            vec3 ibl = eval_env_irradiance(normal);
+            vec3 local_color = diffuse_color * mat.albedo.x * (diffuse_intensity + ibl);
+            local_color += vec3(1.0) * specular_intensity;
             sample_color += weight * local_color;
 
             if (depth >= max_depth) {
