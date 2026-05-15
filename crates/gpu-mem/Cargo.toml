@@ -1,0 +1,11 @@
+[package]
+name = "gpu-mem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Query GPU video memory (VRAM) — zero unsafe, zero dependencies"
+keywords = ["gpu", "vram", "memory", "graphics"]
+categories = ["hardware-support", "os"]
+
+# No dependencies — pure std.
+[dependencies]

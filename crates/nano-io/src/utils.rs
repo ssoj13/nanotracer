@@ -3,7 +3,7 @@
 use glam::Vec3;
 use image::{ImageBuffer, Rgb};
 
-use crate::color::apply_tonemap_srgb;
+use nano_core::color::apply_tonemap_srgb;
 
 /// Convert a Vec3 color to a clamped RGB pixel value
 #[inline]

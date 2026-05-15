@@ -1,10 +1,10 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
-use crate::geometry::Geometry;
-use crate::material::{checkerboard_material, Material};
-use crate::mesh::Mesh;
-use crate::scene::Scene;
+use nano_core::geometry::Geometry;
+use nano_core::material::{checkerboard_material, Material};
+use nano_core::mesh::Mesh;
+use nano_core::scene::Scene;
 
 pub const MATERIAL_FLAG_CHECKERBOARD: u32 = 1;
 
@@ -159,6 +159,7 @@ pub fn build_gpu_scene_with_detail_boost(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_mesh(
     mesh: &Mesh,
     material_index: u32,
@@ -177,7 +178,7 @@ fn append_mesh(
     if mesh.normals.len() == mesh.vertices.len() {
         normals.extend(mesh.normals.iter().map(|n| [n.x, n.y, n.z, 0.0]));
     } else {
-        normals.extend(std::iter::repeat([0.0, 1.0, 0.0, 0.0]).take(mesh.vertices.len()));
+        normals.extend(std::iter::repeat_n([0.0, 1.0, 0.0, 0.0], mesh.vertices.len()));
     }
 
     for tri in &mesh.indices {

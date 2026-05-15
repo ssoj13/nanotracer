@@ -1,18 +1,65 @@
-[package]
-name = "nanotracer-rs"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = [
+    "crates/gpu-mem",
+    "crates/nano-core",
+    "crates/nano-io",
+    "crates/nano-shaders",
+    "crates/nano-gpu",
+    "crates/nano-render",
+    "crates/nano-splat",
+]
+# splat-ref is the CPU reference implementation, kept as a source-only doc tree.
+# It references the old monolithic `crate::renderer::*` paths from before the
+# GPU refactor and therefore does not compile — it is intentionally excluded
+# from the workspace so a `cargo build` does not try to compile it.
+exclude = ["crates/splat-ref"]
+
+[workspace.package]
+version = "0.2.0"
 edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+glam      = "0.32"
+image     = "0.25"
+clap      = { version = "4.6", features = ["derive"] }
+exr       = "1.74"
+fastrand  = "2.4"
+ash       = "0.38"
+shaderc   = "0.10"
+bytemuck  = { version = "1.25", features = ["derive"] }
+indicatif = "0.18"
+gltf      = "1.4"
+
+# In-workspace crates (referenced by path so the bin and crates pick them up).
+gpu-mem      = { path = "crates/gpu-mem" }
+nano-core    = { path = "crates/nano-core" }
+nano-io      = { path = "crates/nano-io" }
+nano-shaders = { path = "crates/nano-shaders" }
+nano-gpu     = { path = "crates/nano-gpu" }
+nano-render  = { path = "crates/nano-render" }
+nano-splat   = { path = "crates/nano-splat" }
+
+# ── Binary package at workspace root ────────────────────────────────────────
+
+[package]
+name        = "nanotracer-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPU-accelerated path tracer with Gaussian-splat export (Vulkan ray queries)."
+
+[[bin]]
+name = "nanotracer-rs"
+path = "src/main.rs"
 
 [dependencies]
-glam = "0.32"
-image = "0.25"
-clap = { version = "4.6", features = ["derive"] }
-exr = "1.74"
-fastrand = "2.4"
-num_cpus = "1.17"
-rtbvh = "0.6.2"
-ash = "0.38"
-shaderc = "0.10"
-bytemuck = { version = "1.25", features = ["derive"] }
-indicatif = "0.18"
-gltf = "1.4"
+nano-core   = { workspace = true }
+nano-io     = { workspace = true }
+nano-render = { workspace = true }
+nano-splat  = { workspace = true }
+gpu-mem     = { workspace = true }
+glam        = { workspace = true }
+clap        = { workspace = true }
+fastrand    = { workspace = true }

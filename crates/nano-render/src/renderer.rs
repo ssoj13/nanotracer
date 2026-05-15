@@ -1,16 +1,16 @@
-use std::ffi::CStr;
 use std::mem;
 use std::time::Instant;
 
 use ash::vk;
-use indicatif::{ProgressBar, ProgressStyle};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::environment::EnvGpuData;
-use crate::gpu_scene::build_gpu_scene;
-use crate::scene::Scene;
-use crate::vk_runtime::{AccelResource, BufferResource, ImageResource, VkContext};
+use nano_core::LightSampling;
+use nano_core::environment::EnvGpuData;
+use nano_core::scene::Scene;
+use nano_gpu::gpu_scene::build_gpu_scene;
+use nano_gpu::vk_runtime::{AccelResource, BufferResource, ImageResource, VkContext};
 
 pub struct RenderConfig {
     pub width: u32,
@@ -22,12 +22,6 @@ pub struct RenderConfig {
     pub refraction_depth: i32,
     pub tonemap: bool,
     pub light_sampling: LightSampling,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum LightSampling {
-    All,
-    One,
 }
 
 #[repr(C)]
@@ -190,10 +184,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         reflection_depth: config.reflection_depth.max(0) as u32,
         refraction_depth: config.refraction_depth.max(0) as u32,
         light_count: gpu_scene.lights.len() as u32,
-        light_sampling: match config.light_sampling {
-            LightSampling::All => 0,
-            LightSampling::One => 1,
-        },
+        light_sampling: config.light_sampling.as_u32(),
         use_env: if env_data.use_sky { 0 } else { 1 },
         use_sky: if env_data.use_sky { 1 } else { 0 },
         env_width: env_data.width,
@@ -212,7 +203,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
 
     pb.inc(1);
     pb.set_message("create pipeline");
-    let descriptor_set_layout = create_descriptor_set_layout(&device)?;
+    let descriptor_set_layout = create_descriptor_set_layout(device)?;
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo {
@@ -224,12 +215,13 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         )?
     };
 
-    let shader_module = ctx.create_shader_module(COMPUTE_SHADER, "ray_query.comp")?;
+    let shader_src = nano_shaders::assemble(RENDERER_BINDINGS, RENDERER_BODY);
+    let shader_module = ctx.create_shader_module(&shader_src, "ray_query.comp")?;
 
     let stage_info = vk::PipelineShaderStageCreateInfo {
         stage: vk::ShaderStageFlags::COMPUTE,
         module: shader_module,
-        p_name: CStr::from_bytes_with_nul(b"main\0")?.as_ptr(),
+        p_name: c"main".as_ptr(),
         ..Default::default()
     };
 
@@ -291,7 +283,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
     }[0];
 
     write_descriptor_set(
-        &device,
+        device,
         descriptor_set,
         &tlas,
         &output_image,
@@ -330,8 +322,8 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
             &[],
         );
 
-        let group_x = (config.width + 7) / 8;
-        let group_y = (config.height + 7) / 8;
+        let group_x = config.width.div_ceil(8);
+        let group_y = config.height.div_ceil(8);
         device.cmd_dispatch(command_buffer, group_x, group_y, 1);
 
         ctx.transition_image(
@@ -533,6 +525,7 @@ fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSe
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_descriptor_set(
     device: &ash::Device,
     descriptor_set: vk::DescriptorSet,
@@ -690,21 +683,11 @@ fn write_descriptor_set(
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
+// ── Renderer-specific GLSL ─────────────────────────────────────────────────
+// Concatenated with nano_shaders::PREAMBLE + HELPERS at shader-build time.
 
-const COMPUTE_SHADER: &str = r#"#version 460
-#extension GL_EXT_ray_query : require
-
+const RENDERER_BINDINGS: &str = r#"
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-
-struct Material {
-    vec3 diffuse;
-    float specular_exponent;
-    vec4 albedo;
-    float refractive_index;
-    uint flags;
-    uint _pad0;
-    uint _pad1;
-};
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
 layout(set = 0, binding = 1, rgba32f) uniform image2D outImage;
@@ -734,11 +717,9 @@ layout(set = 0, binding = 8) uniform Params {
     uint _pad1;
 } params;
 layout(set = 0, binding = 9) uniform sampler2D env_map;
+"#;
 
-const uint FLAG_CHECKER = 1u;
-const float EPS = 2e-3;
-const int MAX_STACK = 16;
-
+const RENDERER_BODY: &str = r#"
 float halton(uint index, uint base) {
     float result = 0.0;
     float f = 1.0 / float(base);
@@ -749,102 +730,6 @@ float halton(uint index, uint base) {
         f /= float(base);
     }
     return result;
-}
-
-uint wang_hash(uint seed) {
-    seed = (seed ^ 61u) ^ (seed >> 16u);
-    seed *= 9u;
-    seed = seed ^ (seed >> 4u);
-    seed *= 0x27d4eb2du;
-    seed = seed ^ (seed >> 15u);
-    return seed;
-}
-
-float rand01(uint seed) {
-    return float(wang_hash(seed)) / 4294967296.0;
-}
-
-float max_component(vec3 v) {
-    return max(v.x, max(v.y, v.z));
-}
-
-vec3 reflect_dir(vec3 i, vec3 n) {
-    return i - 2.0 * dot(i, n) * n;
-}
-
-vec3 refract_dir(vec3 i, vec3 n, float eta_t, float eta_i) {
-    float cosi = clamp(-dot(i, n), -1.0, 1.0);
-    float eta_i_local = eta_i;
-    float eta_t_local = eta_t;
-    vec3 n_local = n;
-    if (cosi < 0.0) {
-        cosi = -cosi;
-        n_local = -n_local;
-        float tmp = eta_i_local;
-        eta_i_local = eta_t_local;
-        eta_t_local = tmp;
-    }
-    float eta = eta_i_local / eta_t_local;
-    float k = 1.0 - eta * eta * (1.0 - cosi * cosi);
-    if (k < 0.0) {
-        return reflect_dir(i, n_local);
-    }
-    return normalize(i * eta + n_local * (eta * cosi - sqrt(k)));
-}
-
-vec3 offset_origin(vec3 point, vec3 normal, vec3 dir) {
-    if (dot(dir, normal) < 0.0) {
-        return point - normal * EPS;
-    }
-    return point + normal * EPS;
-}
-
-vec3 checker_color(vec3 pos) {
-    int checker = (int(0.5 * pos.x + 1000.0) + int(0.5 * pos.z)) & 1;
-    if (checker != 0) {
-        return vec3(0.3, 0.3, 0.3);
-    }
-    return vec3(0.3, 0.2, 0.1);
-}
-
-vec3 sample_environment(vec3 dir) {
-    if (params.use_sky != 0u) {
-        vec3 sky_blue = vec3(0.5, 0.7, 1.0);
-        vec3 horizon = vec3(1.0, 0.9, 0.7);
-        float t = (normalize(dir).y + 1.0) * 0.5;
-        return sky_blue * t + horizon * (1.0 - t);
-    }
-
-    vec3 n = normalize(dir);
-    float phi = atan(n.z, n.x);
-    float theta = acos(clamp(-n.y, -1.0, 1.0));
-    float u = fract(phi / (2.0 * 3.14159265) + 0.5);
-    float v = clamp(theta / 3.14159265, 0.0, 1.0);
-    vec3 hdr = texture(env_map, vec2(u, v)).rgb * params.exposure;
-    return hdr;
-}
-
-bool trace_ray(vec3 origin, vec3 dir, float t_max, out uint prim_id, out vec2 bary, out float t) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
-        return false;
-    }
-    prim_id = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
-    bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
-    t = rayQueryGetIntersectionTEXT(rq, true);
-    return true;
-}
-
-float shadow_ray(vec3 origin, vec3 dir, float dist) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.001, dir, dist);
-    while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
-        return 1.0;
-    }
-    return 0.0;
 }
 
 void main() {
@@ -938,7 +823,6 @@ void main() {
                         if (visibility <= 0.0) {
                             continue;
                         }
-
                         diffuse_intensity += max(dot(light_dir, normal), 0.0);
                         if (mat.albedo.y > 0.0) {
                             vec3 refl = reflect_dir(-light_dir, normal);
@@ -965,8 +849,10 @@ void main() {
                 }
             }
 
+            // Normalised Phong: integrated lobe energy = ks regardless of n.
+            float spec_norm = (mat.specular_exponent + 2.0) / (2.0 * PI);
             vec3 local_color = diffuse_color * diffuse_intensity * mat.albedo.x;
-            local_color += vec3(1.0) * specular_intensity * mat.albedo.y;
+            local_color += vec3(1.0) * specular_intensity * mat.albedo.y * spec_norm;
             sample_color += weight * local_color;
 
             if (depth >= max_depth) {
@@ -982,22 +868,36 @@ void main() {
                 weight /= p;
             }
 
-            if (mat.albedo.z > 0.0 && depth < max_reflect && stack_size < MAX_STACK) {
+            // Schlick Fresnel rebalance for dielectrics with both kr and kt > 0:
+            // F0 at normal incidence, → 1 at grazing (glass becomes mirror-like at edges).
+            float kr_eff = mat.albedo.z;
+            float kt_eff = mat.albedo.w;
+            if (mat.albedo.z > 0.0 && mat.albedo.w > 0.0) {
+                float cosi = max(-dot(dir, normal), 0.0);
+                float f0_s = (mat.refractive_index - 1.0) / (mat.refractive_index + 1.0);
+                float f0 = f0_s * f0_s;
+                float fresnel = f0 + (1.0 - f0) * pow(1.0 - cosi, 5.0);
+                float total = mat.albedo.z + mat.albedo.w;
+                kr_eff = fresnel * total;
+                kt_eff = (1.0 - fresnel) * total;
+            }
+
+            if (kr_eff > 0.0 && depth < max_reflect && stack_size < MAX_STACK) {
                 vec3 refl_dir = reflect_dir(dir, normal);
                 vec3 refl_origin = offset_origin(hit_pos, normal, refl_dir);
                 stack_origin[stack_size] = refl_origin;
                 stack_dir[stack_size] = refl_dir;
-                stack_weight[stack_size] = weight * mat.albedo.z;
+                stack_weight[stack_size] = weight * kr_eff;
                 stack_depth[stack_size] = depth + 1;
                 stack_size++;
             }
 
-            if (mat.albedo.w > 0.0 && depth < max_refract && stack_size < MAX_STACK) {
+            if (kt_eff > 0.0 && depth < max_refract && stack_size < MAX_STACK) {
                 vec3 refr_dir = refract_dir(dir, normal, mat.refractive_index, 1.0);
                 vec3 refr_origin = offset_origin(hit_pos, normal, refr_dir);
                 stack_origin[stack_size] = refr_origin;
                 stack_dir[stack_size] = refr_dir;
-                stack_weight[stack_size] = weight * mat.albedo.w;
+                stack_weight[stack_size] = weight * kt_eff;
                 stack_depth[stack_size] = depth + 1;
                 stack_size++;
             }

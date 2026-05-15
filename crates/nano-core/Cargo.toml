@@ -1,0 +1,11 @@
+[package]
+name        = "nano-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scene / geometry / mesh / material / colour model for nanotracer-rs (CPU-only data, no GPU deps)."
+
+[dependencies]
+glam     = { workspace = true }
+exr      = { workspace = true }
+bytemuck = { workspace = true }

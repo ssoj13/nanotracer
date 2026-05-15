@@ -1,0 +1,12 @@
+{
+  "active": false,
+  "completed_at": "2026-05-15T00:00:00Z",
+  "note": "false-trigger from magic-keyword hook; nothing to resume",
+  "source": "false-trigger",
+  "_meta": {
+    "mode": "autopilot",
+    "sessionId": "ea7f5b04-a567-44b2-82db-d78898cf3b05",
+    "updatedAt": "2026-05-15T17:44:48.428Z",
+    "updatedBy": "state_write_tool"
+  }
+}

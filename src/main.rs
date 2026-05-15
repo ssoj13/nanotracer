@@ -1,17 +1,18 @@
 use clap::Parser;
 use glam::{Quat, Vec3};
-use nanotracer_rs::environment::EnvironmentMap;
-use nanotracer_rs::geometry::Object;
-use nanotracer_rs::gltf_loader::load_glb_mesh;
-use nanotracer_rs::material::{
+
+use nano_core::LightSampling;
+use nano_core::environment::EnvironmentMap;
+use nano_core::geometry::Object;
+use nano_core::material::{
     GLASS, IVORY, MATTE_BLUE, MATTE_GREEN, MATTE_RED, MATTE_WHITE, MIRROR, RED_RUBBER,
 };
-use nanotracer_rs::mesh::{cube, pyramid, torus, Mesh};
-use nanotracer_rs::rt_renderer::{render, LightSampling as RenderLightSampling, RenderConfig};
-use nanotracer_rs::rt_splats::{generate_splats_gpu, LightSampling as SplatLightSampling, SplatConfigGpu};
-use nanotracer_rs::scene::{Light, Scene};
-use nanotracer_rs::splat_gpu::write_ply;
-use nanotracer_rs::utils::save_image;
+use nano_core::mesh::{Mesh, cube, pyramid, torus};
+use nano_core::scene::{Light, Scene};
+use nano_io::gltf_loader::load_glb_mesh;
+use nano_io::utils::save_image;
+use nano_render::{RenderConfig, render};
+use nano_splat::{SplatConfigGpu, generate_splats_gpu, write_ply};
 
 #[derive(Parser)]
 #[command(name = "nanotracer")]
@@ -115,6 +116,13 @@ struct Args {
     #[arg(long = "splat-scale")]
     splat_scale: Option<f32>,
 
+    /// Keep view-dependent SH coefficients for reflective/refractive materials.
+    /// By default mirror/glass splats use DC only to avoid order-3 SH ringing;
+    /// turning this on reintroduces the ringing but preserves some directional
+    /// reflection cues. Useful for stylised splat output.
+    #[arg(long = "sh-keep-glossy", default_value_t = false)]
+    sh_keep_glossy: bool,
+
     /// Add mesh primitives: cube, pyramid, torus, all
     #[arg(long = "mesh")]
     mesh: Option<String>,
@@ -138,6 +146,18 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    if let Some(info) = gpu_mem::query() {
+        let mib = |b: u64| b / (1024 * 1024);
+        println!(
+            "GPU: {} ({} MiB VRAM, {} MiB free){}",
+            info.name,
+            mib(info.dedicated_vram),
+            mib(info.free_vram),
+            if info.unified { ", unified" } else { "" },
+        );
+    }
+
     const WIDTH: usize = 1024;
     const HEIGHT: usize = 768;
     const FOV: f32 = 1.05;
@@ -213,10 +233,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(splat_path) = &args.splat_output {
         println!("GPU splat generation...");
-        let light_sampling = match args.light_sampling.as_str() {
-            "all" => SplatLightSampling::All,
-            _ => SplatLightSampling::One,
-        };
+        // Note: `--light-sampling` is intentionally ignored on the splat path —
+        // the SH fitter inside the shader always sums all lights to keep the
+        // hemisphere LSQ low-variance (per-direction light pick would show up
+        // as 'splotched colour' speckle in the fitted SH).
         let config = SplatConfigGpu {
             density: args.splat_density,
             sh_samples: args.sh_samples,
@@ -229,7 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             radiance_clamp: args.radiance_clamp,
             detail_boost: args.detail_boost,
             detail_boost_max: args.detail_boost_max,
-            light_sampling,
+            keep_glossy_sh: args.sh_keep_glossy,
             seed: scene_seed,
         };
         let gaussians = generate_splats_gpu(&scene, &config)?;
@@ -242,8 +262,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Resolution: {}x{}", WIDTH, HEIGHT);
         println!("AA: {}x{}", args.aa_samples, args.aa_samples);
         let light_sampling = match args.light_sampling.as_str() {
-            "all" => RenderLightSampling::All,
-            _ => RenderLightSampling::One,
+            "all" => LightSampling::All,
+            _ => LightSampling::One,
         };
 
         let config = RenderConfig {

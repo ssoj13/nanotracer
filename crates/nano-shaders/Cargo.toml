@@ -1,0 +1,9 @@
+[package]
+name        = "nano-shaders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared GLSL string constants for nanotracer-rs compute shaders."
+
+# Pure string constants — no runtime deps.
+[dependencies]

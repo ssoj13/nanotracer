@@ -1,0 +1,15 @@
+[package]
+name        = "nano-splat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPU Gaussian-splat generator with binary 3DGS-compatible PLY writer."
+
+[dependencies]
+nano-core    = { workspace = true }
+nano-gpu     = { workspace = true }
+nano-shaders = { workspace = true }
+glam         = { workspace = true }
+ash          = { workspace = true }
+bytemuck     = { workspace = true }
+indicatif    = { workspace = true }

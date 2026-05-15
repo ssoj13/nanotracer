@@ -1,0 +1,15 @@
+[package]
+name        = "nano-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPU path-tracing image renderer for nanotracer-rs (Vulkan ray queries)."
+
+[dependencies]
+nano-core    = { workspace = true }
+nano-gpu     = { workspace = true }
+nano-shaders = { workspace = true }
+glam         = { workspace = true }
+ash          = { workspace = true }
+bytemuck     = { workspace = true }
+indicatif    = { workspace = true }

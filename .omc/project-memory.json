@@ -1,0 +1,373 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1778859925840,
+  "projectRoot": "C:\\projects\\projects.rust.cg\\nanotracer-rs",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "data": {
+      "path": "data",
+      "purpose": "Data files",
+      "fileCount": 2,
+      "lastAccessed": 1778859925798,
+      "keyFiles": [
+        "splat.jpg",
+        "studio.exr"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 15,
+      "lastAccessed": 1778859925798,
+      "keyFiles": [
+        "color.rs",
+        "environment.rs",
+        "geometry.rs",
+        "gltf_loader.rs",
+        "gpu_scene.rs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src",
+      "accessCount": 11,
+      "lastAccessed": 1778865352817,
+      "type": "directory"
+    },
+    {
+      "path": "crates\\nano-render\\src\\renderer.rs",
+      "accessCount": 11,
+      "lastAccessed": 1778873916027,
+      "type": "file"
+    },
+    {
+      "path": "src\\main.rs",
+      "accessCount": 9,
+      "lastAccessed": 1778873990937,
+      "type": "file"
+    },
+    {
+      "path": "src\\rt_splats.rs",
+      "accessCount": 8,
+      "lastAccessed": 1778863992636,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-gpu\\src\\vk_runtime.rs",
+      "accessCount": 7,
+      "lastAccessed": 1778868196174,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-gpu\\src\\gpu_scene.rs",
+      "accessCount": 5,
+      "lastAccessed": 1778868179120,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 5,
+      "lastAccessed": 1778874071683,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\material.rs",
+      "accessCount": 3,
+      "lastAccessed": 1778873877626,
+      "type": "file"
+    },
+    {
+      "path": "todo.md",
+      "accessCount": 3,
+      "lastAccessed": 1778874078762,
+      "type": "file"
+    },
+    {
+      "path": "src\\vk_runtime.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778860917258,
+      "type": "file"
+    },
+    {
+      "path": "src\\rt_renderer.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778864328661,
+      "type": "directory"
+    },
+    {
+      "path": "src\\mesh.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778864436702,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1778865906565,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\geometry.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778866110312,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\mesh.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778866127519,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\scene.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778866134334,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\environment.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778866166560,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-io\\src\\gltf_loader.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778866185153,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-io\\src\\utils.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778866189853,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\lib.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778868336913,
+      "type": "file"
+    },
+    {
+      "path": "AGENTS.md",
+      "accessCount": 2,
+      "lastAccessed": 1778873303467,
+      "type": "file"
+    },
+    {
+      "path": "DIAGRAMS.md",
+      "accessCount": 2,
+      "lastAccessed": 1778873336573,
+      "type": "file"
+    },
+    {
+      "path": "plan1.md",
+      "accessCount": 2,
+      "lastAccessed": 1778873358387,
+      "type": "file"
+    },
+    {
+      "path": "src\\lib.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778859986000,
+      "type": "file"
+    },
+    {
+      "path": "src\\splat\\mod.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778859992766,
+      "type": "file"
+    },
+    {
+      "path": "src\\splat_gpu.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778859993315,
+      "type": "file"
+    },
+    {
+      "path": "src\\splat\\sh.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778860001600,
+      "type": "file"
+    },
+    {
+      "path": "src\\splat\\sampler.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778860002688,
+      "type": "file"
+    },
+    {
+      "path": "src\\splat\\ply.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778860002960,
+      "type": "file"
+    },
+    {
+      "path": "src\\gpu_scene.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778860180607,
+      "type": "file"
+    },
+    {
+      "path": "src\\color.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778860192001,
+      "type": "file"
+    },
+    {
+      "path": "test.cmd",
+      "accessCount": 1,
+      "lastAccessed": 1778860284114,
+      "type": "file"
+    },
+    {
+      "path": "test_hi.cmd",
+      "accessCount": 1,
+      "lastAccessed": 1778860284561,
+      "type": "file"
+    },
+    {
+      "path": "test_lo.cmd",
+      "accessCount": 1,
+      "lastAccessed": 1778860285585,
+      "type": "file"
+    },
+    {
+      "path": "src\\material.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778864311839,
+      "type": "file"
+    },
+    {
+      "path": "src\\scene.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778864354061,
+      "type": "file"
+    },
+    {
+      "path": "src\\geometry.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778864355206,
+      "type": "file"
+    },
+    {
+      "path": "src\\utils.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778864355382,
+      "type": "file"
+    },
+    {
+      "path": "src\\environment.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778864410825,
+      "type": "file"
+    },
+    {
+      "path": "WGPU_RESEARCH.md",
+      "accessCount": 1,
+      "lastAccessed": 1778865088964,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1778865915306,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-io\\Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1778865922369,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-shaders\\Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1778865923869,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-gpu\\Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1778865926414,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-render\\Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1778865928969,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-splat\\Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1778865930898,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-io\\src\\lib.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778866193028,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-gpu\\src\\lib.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778866212429,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-shaders\\src\\lib.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778866279888,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-splat\\src\\ply.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778866325628,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

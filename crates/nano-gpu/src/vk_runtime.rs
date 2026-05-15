@@ -151,7 +151,7 @@ impl VkContext {
         data: &[T],
         usage: vk::BufferUsageFlags,
     ) -> Result<BufferResource, Box<dyn std::error::Error>> {
-        let size = (data.len() * mem::size_of::<T>()) as vk::DeviceSize;
+        let size = mem::size_of_val(data) as vk::DeviceSize;
         let buffer = self.create_buffer(
             size,
             usage,
@@ -509,9 +509,11 @@ impl VkContext {
                 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0,
             ],
-            instance_custom_index_and_mask: (0 & 0x00FF_FFFF) | (0xFF << 24),
-            instance_shader_binding_table_record_offset_and_flags: (0 & 0x00FF_FFFF)
-                | (instance_flags << 24),
+            // Packed: low 24 bits = instance custom index (0), high 8 bits = visibility mask.
+            // Custom index 0 means all triangles share the same gl_InstanceCustomIndexEXT.
+            instance_custom_index_and_mask: 0xFFu32 << 24,
+            // Packed: low 24 bits = SBT record offset (0, single hit group), high 8 bits = flags.
+            instance_shader_binding_table_record_offset_and_flags: instance_flags << 24,
             acceleration_structure_reference: blas_address,
         };
 

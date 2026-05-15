@@ -1,24 +1,24 @@
-use std::ffi::CStr;
 use std::mem;
 use std::time::Instant;
 
 use ash::vk;
-use indicatif::{ProgressBar, ProgressStyle};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::environment::EnvGpuData;
-use crate::gpu_scene::build_gpu_scene_with_detail_boost;
-use crate::scene::Scene;
-use crate::splat_gpu::Gaussian;
-use crate::vk_runtime::{AccelResource, BufferResource, ImageResource, VkContext};
+use nano_core::environment::EnvGpuData;
+use nano_core::scene::Scene;
+use nano_gpu::gpu_scene::build_gpu_scene_with_detail_boost;
+use nano_gpu::vk_runtime::{AccelResource, BufferResource, ImageResource, VkContext};
 
-#[derive(Clone, Copy, Debug)]
-pub enum LightSampling {
-    All,
-    One,
-}
+use crate::ply::Gaussian;
 
+/// Configuration consumed by [`generate_splats_gpu`].
+///
+/// The `light_sampling` knob from the renderer is intentionally absent — the
+/// SH fitter inside `shade_surface` always sums all lights per direction to
+/// keep the LSQ estimate low-variance (any per-direction Monte-Carlo light
+/// pick shows up as "splotched colour" speckle in the fitted SH).
 pub struct SplatConfigGpu {
     pub density: f32,
     pub sh_samples: u32,
@@ -31,7 +31,12 @@ pub struct SplatConfigGpu {
     pub radiance_clamp: f32,
     pub detail_boost: f32,
     pub detail_boost_max: f32,
-    pub light_sampling: LightSampling,
+    /// Keep view-dependent SH coefficients on reflective/refractive materials.
+    /// Default `false` — DC-only fallback prevents the "rainbow speckle"
+    /// that order-3 SH produces on a hemisphere for sharp specular. Setting
+    /// this to `true` reintroduces the speckle but recovers some directional
+    /// reflection cues — useful for stylised output.
+    pub keep_glossy_sh: bool,
     pub seed: u64,
 }
 
@@ -45,7 +50,6 @@ struct GpuParams {
     reflection_depth: u32,
     refraction_depth: u32,
     light_count: u32,
-    light_sampling: u32,
     use_env: u32,
     use_sky: u32,
     env_width: u32,
@@ -57,6 +61,8 @@ struct GpuParams {
     glossy_mult: f32,
     seed_lo: u32,
     seed_hi: u32,
+    keep_glossy_sh: u32,
+    _pad0: u32,
 }
 
 #[repr(C)]
@@ -199,10 +205,6 @@ pub fn generate_splats_gpu(
         reflection_depth: config.reflection_depth.max(0) as u32,
         refraction_depth: config.refraction_depth.max(0) as u32,
         light_count: gpu_scene.lights.len() as u32,
-        light_sampling: match config.light_sampling {
-            LightSampling::All => 0,
-            LightSampling::One => 1,
-        },
         use_env: if env_data.use_sky { 0 } else { 1 },
         use_sky: if env_data.use_sky { 1 } else { 0 },
         env_width: env_data.width,
@@ -214,6 +216,8 @@ pub fn generate_splats_gpu(
         glossy_mult: config.glossy_mult.max(1.0),
         seed_lo: (config.seed & 0xFFFF_FFFF) as u32,
         seed_hi: ((config.seed >> 32) & 0xFFFF_FFFF) as u32,
+        keep_glossy_sh: if config.keep_glossy_sh { 1 } else { 0 },
+        _pad0: 0,
     };
 
     let params_buffer = ctx.create_buffer_with_data(&[params], vk::BufferUsageFlags::UNIFORM_BUFFER)?;
@@ -226,7 +230,7 @@ pub fn generate_splats_gpu(
 
     pb.inc(1);
     pb.set_message("create pipeline");
-    let descriptor_set_layout = create_splat_descriptor_set_layout(&device)?;
+    let descriptor_set_layout = create_splat_descriptor_set_layout(device)?;
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo {
@@ -238,11 +242,12 @@ pub fn generate_splats_gpu(
         )?
     };
 
-    let shader_module = ctx.create_shader_module(SPLAT_SHADER, "ray_query_splats")?;
+    let shader_src = nano_shaders::assemble(SPLAT_BINDINGS, SPLAT_BODY);
+    let shader_module = ctx.create_shader_module(&shader_src, "ray_query_splats")?;
     let stage_info = vk::PipelineShaderStageCreateInfo {
         stage: vk::ShaderStageFlags::COMPUTE,
         module: shader_module,
-        p_name: CStr::from_bytes_with_nul(b"main\0")?.as_ptr(),
+        p_name: c"main".as_ptr(),
         ..Default::default()
     };
 
@@ -300,7 +305,7 @@ pub fn generate_splats_gpu(
     }[0];
 
     write_splat_descriptor_set(
-        &device,
+        device,
         descriptor_set,
         &tlas,
         &vertices_buffer,
@@ -334,7 +339,7 @@ pub fn generate_splats_gpu(
             &[],
         );
 
-        let group_x = (sample_count + 63) / 64;
+        let group_x = sample_count.div_ceil(64);
         device.cmd_dispatch(ctx.command_buffer, group_x, 1, 1);
 
         device.end_command_buffer(ctx.command_buffer)?;
@@ -360,10 +365,7 @@ pub fn generate_splats_gpu(
             output_buffer.size,
             vk::MemoryMapFlags::empty(),
         )?;
-        let slice = std::slice::from_raw_parts(
-            ptr as *const GpuGaussian,
-            sample_count as usize,
-        );
+        let slice = std::slice::from_raw_parts(ptr as *const GpuGaussian, sample_count as usize);
         let mut result = Vec::with_capacity(sample_count as usize);
         for g in slice {
             let sh_rest = g
@@ -707,21 +709,11 @@ fn write_splat_descriptor_set(
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
+// ── Splat-specific GLSL ────────────────────────────────────────────────────
+// Concatenated with nano_shaders::PREAMBLE + HELPERS at shader-build time.
 
-const SPLAT_SHADER: &str = r#"#version 460
-#extension GL_EXT_ray_query : require
-
+const SPLAT_BINDINGS: &str = r#"
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-struct Material {
-    vec3 diffuse;
-    float specular_exponent;
-    vec4 albedo;
-    float refractive_index;
-    uint flags;
-    uint _pad0;
-    uint _pad1;
-};
 
 struct GaussianOut {
     vec4 pos;
@@ -749,7 +741,6 @@ layout(set = 0, binding = 9) uniform Params {
     uint reflection_depth;
     uint refraction_depth;
     uint light_count;
-    uint light_sampling;
     uint use_env;
     uint use_sky;
     uint env_width;
@@ -761,30 +752,21 @@ layout(set = 0, binding = 9) uniform Params {
     float glossy_mult;
     uint seed_lo;
     uint seed_hi;
+    uint keep_glossy_sh;
+    uint _pad0;
 } params;
 layout(set = 0, binding = 10) uniform sampler2D env_map;
+"#;
 
-const float EPS = 2e-3;
-const int MAX_STACK = 16;
+const SPLAT_BODY: &str = r#"
+// SH basis coefficients matching the graphdeco-inria 3DGS reference
+// (utils/sh_utils.py). Viewers that read our PLY expect this exact
+// convention; mixing in another set yields psychedelic colours.
 const float SH_C0 = 0.2820948;
 const float SH_C1 = 0.48860252;
 const float SH_C2[5] = float[5](1.0925485, -1.0925485, 0.31539157, -1.0925485, 0.54627424);
 const float SH_C3[7] = float[7](-0.5900436, 2.8906114, -0.4570458, 0.37317634, -0.4570458, 1.4453057, -0.5900436);
 
-uint wang_hash(uint seed) {
-    seed = (seed ^ 61u) ^ (seed >> 16u);
-    seed *= 9u;
-    seed = seed ^ (seed >> 4u);
-    seed *= 0x27d4eb2du;
-    seed = seed ^ (seed >> 15u);
-    return seed;
-}
-
-float rand01(uint seed) {
-    return float(wang_hash(seed)) / 4294967296.0;
-}
-
-const float PI = 3.14159265;
 const float GOLDEN = 0.61803398875;
 
 vec3 sample_uniform_hemisphere(uint seed, uint idx, uint count) {
@@ -796,102 +778,6 @@ vec3 sample_uniform_hemisphere(uint seed, uint idx, uint count) {
     return vec3(r * cos(phi), r * sin(phi), z);
 }
 
-float max_component(vec3 v) {
-    return max(v.x, max(v.y, v.z));
-}
-
-vec3 reflect_dir(vec3 i, vec3 n) {
-    return i - 2.0 * dot(i, n) * n;
-}
-
-vec3 refract_dir(vec3 i, vec3 n, float eta_t, float eta_i) {
-    float cosi = clamp(-dot(i, n), -1.0, 1.0);
-    float eta_i_local = eta_i;
-    float eta_t_local = eta_t;
-    vec3 n_local = n;
-    if (cosi < 0.0) {
-        cosi = -cosi;
-        n_local = -n_local;
-        float tmp = eta_i_local;
-        eta_i_local = eta_t_local;
-        eta_t_local = tmp;
-    }
-    float eta = eta_i_local / eta_t_local;
-    float k = 1.0 - eta * eta * (1.0 - cosi * cosi);
-    if (k < 0.0) {
-        return reflect_dir(i, n_local);
-    }
-    return normalize(i * eta + n_local * (eta * cosi - sqrt(k)));
-}
-
-vec3 offset_origin(vec3 point, vec3 normal, vec3 dir) {
-    if (dot(dir, normal) < 0.0) {
-        return point - normal * EPS;
-    }
-    return point + normal * EPS;
-}
-
-vec3 checker_color(vec3 pos) {
-    int checker = (int(0.5 * pos.x + 1000.0) + int(0.5 * pos.z)) & 1;
-    if (checker != 0) {
-        return vec3(0.3, 0.3, 0.3);
-    }
-    return vec3(0.3, 0.2, 0.1);
-}
-
-vec3 sample_environment(vec3 dir) {
-    if (params.use_sky != 0u) {
-        vec3 sky_blue = vec3(0.5, 0.7, 1.0);
-        vec3 horizon = vec3(1.0, 0.9, 0.7);
-        float t = (normalize(dir).y + 1.0) * 0.5;
-        return sky_blue * t + horizon * (1.0 - t);
-    }
-
-    vec3 n = normalize(dir);
-    float phi = atan(n.z, n.x);
-    float theta = acos(clamp(-n.y, -1.0, 1.0));
-    float u = fract(phi / (2.0 * 3.14159265) + 0.5);
-    float v = clamp(theta / 3.14159265, 0.0, 1.0);
-    vec3 hdr = texture(env_map, vec2(u, v)).rgb * params.exposure;
-    return hdr;
-}
-
-vec3 tonemap_reinhard(vec3 c) {
-    vec3 v = max(c, vec3(0.0));
-    return v / (vec3(1.0) + v);
-}
-
-vec3 linear_to_srgb(vec3 linear) {
-    vec3 v = clamp(linear, vec3(0.0), vec3(1.0));
-    vec3 low = v * 12.92;
-    vec3 high = 1.055 * pow(v, vec3(1.0 / 2.4)) - vec3(0.055);
-    vec3 cutoff = vec3(0.0031308);
-    return mix(high, low, lessThanEqual(v, cutoff));
-}
-
-bool trace_ray(vec3 origin, vec3 dir, float t_max, out uint prim_id, out vec2 bary, out float t) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.001, dir, t_max);
-    while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
-        return false;
-    }
-    prim_id = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
-    bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
-    t = rayQueryGetIntersectionTEXT(rq, true);
-    return true;
-}
-
-float shadow_ray(vec3 origin, vec3 dir, float dist) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.001, dir, dist);
-    while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
-        return 1.0;
-    }
-    return 0.0;
-}
-
 void build_tangent_frame(vec3 n, out vec3 t, out vec3 b) {
     if (abs(n.y) < 0.9) {
         t = normalize(cross(n, vec3(0.0, 1.0, 0.0)));
@@ -901,6 +787,9 @@ void build_tangent_frame(vec3 n, out vec3 t, out vec3 b) {
     b = cross(n, t);
 }
 
+// Iterative stack-based ray tracer for the reflection / refraction recursion
+// inside `shade_surface`. Always sums all lights at each bounce — sufficient
+// for low-variance estimates since each direction is its own LSQ sample.
 vec3 trace_path(vec3 origin, vec3 dir, uint seed_base) {
     vec3 stack_origin[MAX_STACK];
     vec3 stack_dir[MAX_STACK];
@@ -951,8 +840,7 @@ vec3 trace_path(vec3 origin, vec3 dir, uint seed_base) {
         uint mat_idx = tri_materials[prim_id];
         Material mat = materials[mat_idx];
         vec3 diffuse_color = mat.diffuse;
-
-        if ((mat.flags & 1u) != 0u) {
+        if ((mat.flags & FLAG_CHECKER) != 0u) {
             diffuse_color = checker_color(hit_pos);
         }
 
@@ -968,7 +856,6 @@ vec3 trace_path(vec3 origin, vec3 dir, uint seed_base) {
             if (visibility <= 0.0) {
                 continue;
             }
-
             diffuse_intensity += max(dot(light_dir, normal), 0.0);
             if (mat.albedo.y > 0.0) {
                 vec3 refl = reflect_dir(-light_dir, normal);
@@ -976,30 +863,45 @@ vec3 trace_path(vec3 origin, vec3 dir, uint seed_base) {
             }
         }
 
+        // Normalised Phong (see nano-core::material — ks is integrated lobe energy).
+        float spec_norm = (mat.specular_exponent + 2.0) / (2.0 * PI);
         vec3 local_color = diffuse_color * diffuse_intensity * mat.albedo.x;
-        local_color += vec3(1.0) * specular_intensity * mat.albedo.y;
+        local_color += vec3(1.0) * specular_intensity * mat.albedo.y * spec_norm;
         sample_color += weight * local_color;
 
         if (depth >= max_depth) {
             continue;
         }
 
-        if (mat.albedo.z > 0.0 && depth < max_reflect && stack_size < MAX_STACK) {
+        // Schlick Fresnel rebalance for dielectrics (kr > 0 AND kt > 0).
+        float kr_eff = mat.albedo.z;
+        float kt_eff = mat.albedo.w;
+        if (mat.albedo.z > 0.0 && mat.albedo.w > 0.0) {
+            float cosi = max(-dot(d, normal), 0.0);
+            float f0_s = (mat.refractive_index - 1.0) / (mat.refractive_index + 1.0);
+            float f0 = f0_s * f0_s;
+            float fresnel = f0 + (1.0 - f0) * pow(1.0 - cosi, 5.0);
+            float total = mat.albedo.z + mat.albedo.w;
+            kr_eff = fresnel * total;
+            kt_eff = (1.0 - fresnel) * total;
+        }
+
+        if (kr_eff > 0.0 && depth < max_reflect && stack_size < MAX_STACK) {
             vec3 refl_dir = reflect_dir(d, normal);
             vec3 refl_origin = offset_origin(hit_pos, normal, refl_dir);
             stack_origin[stack_size] = refl_origin;
             stack_dir[stack_size] = refl_dir;
-            stack_weight[stack_size] = weight * mat.albedo.z;
+            stack_weight[stack_size] = weight * kr_eff;
             stack_depth[stack_size] = depth + 1;
             stack_size++;
         }
 
-        if (mat.albedo.w > 0.0 && depth < max_refract && stack_size < MAX_STACK) {
+        if (kt_eff > 0.0 && depth < max_refract && stack_size < MAX_STACK) {
             vec3 refr_dir = refract_dir(d, normal, mat.refractive_index, 1.0);
             vec3 refr_origin = offset_origin(hit_pos, normal, refr_dir);
             stack_origin[stack_size] = refr_origin;
             stack_dir[stack_size] = refr_dir;
-            stack_weight[stack_size] = weight * mat.albedo.w;
+            stack_weight[stack_size] = weight * kt_eff;
             stack_depth[stack_size] = depth + 1;
             stack_size++;
         }
@@ -1008,6 +910,9 @@ vec3 trace_path(vec3 origin, vec3 dir, uint seed_base) {
     return sample_color;
 }
 
+// Compute outgoing radiance at a surface point in direction `view_dir`.
+// All lights are summed (see SplatConfigGpu doc — no per-direction
+// light pick for the SH fitter, to keep LSQ low-variance).
 vec3 shade_surface(vec3 pos, vec3 normal, vec3 view_dir, Material mat, vec3 diffuse_color, uint seed_base) {
     vec3 incoming_dir = -view_dir;
     bool is_diffuse_only = mat.albedo.z <= 0.0 && mat.albedo.w <= 0.0;
@@ -1015,59 +920,52 @@ vec3 shade_surface(vec3 pos, vec3 normal, vec3 view_dir, Material mat, vec3 diff
     float diffuse_intensity = 0.0;
     float specular_intensity = 0.0;
 
-    if (!is_diffuse_only || params.light_count > 0u) {
-        if (params.light_count > 0u) {
-            if (params.light_sampling == 0u) {
-                for (uint li = 0u; li < params.light_count; ++li) {
-                    vec3 light_pos = lights[li].xyz;
-                    vec3 light_dir = normalize(light_pos - pos);
-                    float light_dist = length(light_pos - pos);
-                    vec3 shadow_origin = offset_origin(pos, normal, light_dir);
-                    float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
-                    if (visibility <= 0.0) {
-                        continue;
-                    }
-
-                    diffuse_intensity += max(dot(light_dir, normal), 0.0);
-                    if (!is_diffuse_only) {
-                        vec3 refl = reflect_dir(-light_dir, normal);
-                        specular_intensity += pow(max(dot(-refl, incoming_dir), 0.0), mat.specular_exponent);
-                    }
-                }
-            } else {
-                uint li = min(uint(rand01(seed_base ^ 0x9e3779b9u) * float(params.light_count)), params.light_count - 1u);
-                float light_weight = float(params.light_count);
-
-                vec3 light_pos = lights[li].xyz;
-                vec3 light_dir = normalize(light_pos - pos);
-                float light_dist = length(light_pos - pos);
-                vec3 shadow_origin = offset_origin(pos, normal, light_dir);
-                float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
-                if (visibility > 0.0) {
-                    diffuse_intensity += max(dot(light_dir, normal), 0.0) * light_weight;
-                    if (!is_diffuse_only) {
-                        vec3 refl = reflect_dir(-light_dir, normal);
-                        specular_intensity += pow(max(dot(-refl, incoming_dir), 0.0), mat.specular_exponent) * light_weight;
-                    }
-                }
+    if (params.light_count > 0u) {
+        for (uint li = 0u; li < params.light_count; ++li) {
+            vec3 light_pos = lights[li].xyz;
+            vec3 light_dir = normalize(light_pos - pos);
+            float light_dist = length(light_pos - pos);
+            vec3 shadow_origin = offset_origin(pos, normal, light_dir);
+            float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
+            if (visibility <= 0.0) {
+                continue;
+            }
+            diffuse_intensity += max(dot(light_dir, normal), 0.0);
+            if (!is_diffuse_only) {
+                vec3 refl = reflect_dir(-light_dir, normal);
+                specular_intensity += pow(max(dot(-refl, incoming_dir), 0.0), mat.specular_exponent);
             }
         }
     }
 
+    // Normalised Phong (see nano-core::material — ks is integrated lobe energy).
+    float spec_norm = (mat.specular_exponent + 2.0) / (2.0 * PI);
     vec3 color = diffuse_color * diffuse_intensity * mat.albedo.x;
-    color += vec3(1.0) * specular_intensity * mat.albedo.y;
+    color += vec3(1.0) * specular_intensity * mat.albedo.y * spec_norm;
 
     if (!is_diffuse_only) {
-        if (mat.albedo.z > 0.0) {
-            vec3 refl_dir = reflect_dir(incoming_dir, normal);
-            vec3 refl_origin = offset_origin(pos, normal, refl_dir);
-            color += trace_path(refl_origin, refl_dir, seed_base) * mat.albedo.z;
+        // Schlick Fresnel: view_dir points from surface to camera so cos(theta) = view_dir·N.
+        float kr_eff = mat.albedo.z;
+        float kt_eff = mat.albedo.w;
+        if (mat.albedo.z > 0.0 && mat.albedo.w > 0.0) {
+            float cosi = max(dot(view_dir, normal), 0.0);
+            float f0_s = (mat.refractive_index - 1.0) / (mat.refractive_index + 1.0);
+            float f0 = f0_s * f0_s;
+            float fresnel = f0 + (1.0 - f0) * pow(1.0 - cosi, 5.0);
+            float total = mat.albedo.z + mat.albedo.w;
+            kr_eff = fresnel * total;
+            kt_eff = (1.0 - fresnel) * total;
         }
 
-        if (mat.albedo.w > 0.0) {
+        if (kr_eff > 0.0) {
+            vec3 refl_dir = reflect_dir(incoming_dir, normal);
+            vec3 refl_origin = offset_origin(pos, normal, refl_dir);
+            color += trace_path(refl_origin, refl_dir, seed_base) * kr_eff;
+        }
+        if (kt_eff > 0.0) {
             vec3 refr_dir = refract_dir(incoming_dir, normal, mat.refractive_index, 1.0);
             vec3 refr_origin = offset_origin(pos, normal, refr_dir);
-            color += trace_path(refr_origin, refr_dir, seed_base) * mat.albedo.w;
+            color += trace_path(refr_origin, refr_dir, seed_base) * kt_eff;
         }
     }
 
@@ -1093,7 +991,7 @@ float sh_basis(int index, vec3 dir) {
     if (index == 7) return SH_C2[3] * x * z;
     if (index == 8) return SH_C2[4] * (xx - yy);
 
-    if (index == 9) return SH_C3[0] * y * (3.0 * xx - yy);
+    if (index == 9)  return SH_C3[0] * y * (3.0 * xx - yy);
     if (index == 10) return SH_C3[1] * x * y * z;
     if (index == 11) return SH_C3[2] * y * (4.0 * zz - xx - yy);
     if (index == 12) return SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
@@ -1216,7 +1114,7 @@ void main() {
     uint mat_idx = tri_materials[tri_idx];
     Material mat = materials[mat_idx];
     vec3 diffuse_color = mat.diffuse;
-    if ((mat.flags & 1u) != 0u) {
+    if ((mat.flags & FLAG_CHECKER) != 0u) {
         diffuse_color = checker_color(pos);
     }
 
@@ -1306,8 +1204,18 @@ void main() {
         }
     }
 
+    // Band-aware Tikhonov: stronger regularisation on higher-degree bands.
+    // Hemisphere-only LSQ is rank-deficient for high-frequency modes; without
+    // damping, small sample-to-sample variations amplify into visible speckle
+    // on otherwise constant surfaces.
+    const float band_lambda[16] = float[16](
+        1e-3,                                       // l=0
+        2e-3, 2e-3, 2e-3,                           // l=1
+        5e-3, 5e-3, 5e-3, 5e-3, 5e-3,               // l=2
+        2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2, 2e-2    // l=3
+    );
     for (int i = 0; i < 16; ++i) {
-        ata[i][i] += 1e-4;
+        ata[i][i] += band_lambda[i];
     }
 
     float a_r[16][16];
@@ -1340,14 +1248,31 @@ void main() {
         coeffs[i] = vec3(coeff_r[i], coeff_g[i], coeff_b[i]);
     }
 
-    vec3 sh_dc = coeffs[0] / SH_C0;
+    // LSQ already produces the coefficient in 3DGS feature space:
+    //   alpha_0 such that alpha_0 * Y_0(dir) = alpha_0 * SH_C0 ~= (color - 0.5)
+    // 3DGS viewers reconstruct via `SH_C0 * f_dc`, so f_dc IS alpha_0 — no extra SH_C0.
+    vec3 sh_dc = coeffs[0];
+
+    // Sharp specular / refraction is a high-frequency function of view
+    // direction; order-3 SH on a hemisphere cannot represent it without
+    // severe ringing (the classic "rainbow speckle" on glossy splats).
+    // For these materials, fall back to DC only — equivalent to the CPU
+    // reference's `from_sample_constant` path. DC is the hemisphere-averaged
+    // colour so the splat will look matte-ish but free of speckle.
+    bool drop_view_dependence =
+        (mat.albedo.z > 0.0 || mat.albedo.w > 0.0) && params.keep_glossy_sh == 0u;
+    if (drop_view_dependence) {
+        for (int i = 1; i < 16; ++i) {
+            coeffs[i] = vec3(0.0);
+        }
+    }
 
     GaussianOut out_g;
     out_g.pos = vec4(pos, 1.0);
     out_g.normal = vec4(normal, 0.0);
     out_g.sh_dc = vec4(sh_dc, 0.0);
 
-    // Pack planar format: R[15], G[15], B[15]
+    // Pack planar format: R[1..15], G[1..15], B[1..15] (matches Inria PLY).
     float rest[45];
     int off = 0;
     for (int i = 1; i < 16; ++i) { rest[off++] = coeffs[i].x; }
@@ -1368,8 +1293,11 @@ void main() {
     float opacity_p = (mat.albedo.w > 0.0) ? 0.15 : 0.98;
     float opacity = log(opacity_p / (1.0 - opacity_p));
 
+    // Slightly thicker discs along the normal (0.5 vs 0.3 ratio) — at tight
+    // splat-density / scale settings the thinner ratio left edge-on gaps
+    // that read as dark speckle.
     float tangent_sigma = max(params.splat_scale, 1e-6);
-    float normal_sigma = max(params.splat_scale * 0.3, 1e-6);
+    float normal_sigma = max(params.splat_scale * 0.5, 1e-6);
     out_g.opacity_scale = vec4(opacity, log(tangent_sigma), log(tangent_sigma), log(normal_sigma));
     out_g.rotation = quat_from_normal(normal);
 

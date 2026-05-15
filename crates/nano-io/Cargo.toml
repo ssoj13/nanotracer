@@ -1,0 +1,12 @@
+[package]
+name        = "nano-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Asset I/O for nanotracer-rs (glTF mesh loader, PNG framebuffer writer)."
+
+[dependencies]
+nano-core = { workspace = true }
+glam      = { workspace = true }
+gltf      = { workspace = true }
+image     = { workspace = true }

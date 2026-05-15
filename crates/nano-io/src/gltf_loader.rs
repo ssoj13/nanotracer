@@ -4,7 +4,7 @@ use std::path::Path;
 
 use glam::{Mat3, Mat4, Vec3};
 
-use crate::mesh::Mesh;
+use nano_core::mesh::Mesh;
 
 pub fn load_glb_mesh(path: &Path, scale: f32) -> Result<Mesh, Box<dyn std::error::Error>> {
     let (doc, buffers, _images) = gltf::import(path)?;
