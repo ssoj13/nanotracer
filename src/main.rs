@@ -12,6 +12,8 @@ use nano_core::scene::{Light, Scene};
 use nano_io::gltf_loader::load_glb_mesh;
 use nano_io::utils::save_image;
 use nano_render::{RenderConfig, render};
+use nano_optimize::{TrainConfig, reference::BakeConfig, train as run_training};
+use nano_optimize::adam::AdamConfig;
 use nano_splat::{SplatConfigGpu, generate_splats_gpu, write_ply};
 
 #[derive(Parser)]
@@ -123,6 +125,63 @@ struct Args {
     #[arg(long = "sh-keep-glossy", default_value_t = false)]
     sh_keep_glossy: bool,
 
+    /// Env-map IBL intensity, applied to the implicit `Light::Env`
+    /// when an environment is loaded. 0 disables IBL; 1.0 is the full
+    /// Lambertian-convolved physical value (tends to over-fill shadows
+    /// for our non-physical "unit-radiance" direct-light convention).
+    /// 0.15–0.3 reads well as a soft ambient.
+    #[arg(long = "env-light", default_value_t = 0.15)]
+    env_light: f32,
+
+    /// Add a point light. Repeat for multiple lights.
+    /// Format: `x,y,z,r,g,b,intensity` — 7 floats.
+    #[arg(long = "point-light", value_name = "x,y,z,r,g,b,i")]
+    point_lights: Vec<String>,
+
+    /// Add a rectangle area light. `u` and `v` are world-space
+    /// half-extent vectors (a 4×6 rect with u along +X, v along +Y is
+    /// `u=2,0,0  v=0,3,0`). Optional `two_sided` suffix `0`/`1`.
+    /// Format: `cx,cy,cz,ux,uy,uz,vx,vy,vz,r,g,b,intensity[,two_sided]`.
+    #[arg(long = "rect-light", value_name = "cx,cy,cz,ux,uy,uz,vx,vy,vz,r,g,b,i[,two]")]
+    rect_lights: Vec<String>,
+
+    /// Add a sphere area light.
+    /// Format: `cx,cy,cz,radius,r,g,b,intensity` — 8 floats.
+    #[arg(long = "sphere-light", value_name = "cx,cy,cz,radius,r,g,b,i")]
+    sphere_lights: Vec<String>,
+
+    /// Add an oriented-box area light. Rotation is given as a unit
+    /// quaternion `(x, y, z, w)`. Half-extents are along the box's
+    /// local +X/+Y/+Z before rotation.
+    /// Format: `cx,cy,cz,hx,hy,hz,qx,qy,qz,qw,r,g,b,intensity` — 14 floats.
+    #[arg(long = "box-light", value_name = "cx,cy,cz,hx,hy,hz,qx,qy,qz,qw,r,g,b,i")]
+    box_lights: Vec<String>,
+
+    /// Run the gradient-based splat optimiser after the forward fit.
+    /// Requires `-S/--splats FILE` for the output path. Phase A1 — wires
+    /// scaffolding only; forward / backward rasteriser and Adam updates
+    /// land in later phases.
+    #[arg(long = "train", default_value_t = false)]
+    train: bool,
+
+    /// Number of optimiser iterations.
+    #[arg(long = "train-iters", default_value_t = 30000)]
+    train_iters: u32,
+
+    /// Number of reference frames baked at training start.
+    #[arg(long = "train-views", default_value_t = 50)]
+    train_views: u32,
+
+    /// Reference-frame width / height for training (smaller = faster bake).
+    #[arg(long = "train-width", default_value_t = 512)]
+    train_width: u32,
+    #[arg(long = "train-height", default_value_t = 384)]
+    train_height: u32,
+
+    /// Hard cap on optimiser splat count (densify won't exceed this).
+    #[arg(long = "train-max-splats", default_value_t = 5_000_000)]
+    train_max_splats: usize,
+
     /// Add mesh primitives: cube, pyramid, torus, all
     #[arg(long = "mesh")]
     mesh: Option<String>,
@@ -192,6 +251,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scene.set_environment(EnvironmentMap::procedural_sky());
     }
 
+    // Add the implicit env-light whenever an environment is bound, at
+    // the user-controlled intensity. nano-gpu's build also auto-adds one
+    // at intensity 1.0 if neither this nor an explicit `Light::Env` is
+    // present — that path covers library callers (tests, training).
+    if scene.environment.is_some() && args.env_light > 0.0 {
+        scene.add_light(Light::Env {
+            intensity: args.env_light,
+        });
+    }
+
     if args.no_floor {
         scene.checkerboard_enabled = false;
     }
@@ -220,16 +289,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Add lights
-    scene.add_light(Light {
-        position: Vec3::new(-20.0, 20.0, 20.0),
-    });
-    scene.add_light(Light {
-        position: Vec3::new(30.0, 50.0, -25.0),
-    });
-    scene.add_light(Light {
-        position: Vec3::new(30.0, 20.0, 30.0),
-    });
+    // Add lights — `Light::point` produces the legacy unit-radiance
+    // demo light. Per-light colour/intensity are available via the
+    // explicit `Light::Point { .. }` constructor or the `--*-light`
+    // CLI flags below.
+    scene.add_light(Light::point(Vec3::new(-20.0, 20.0, 20.0)));
+    scene.add_light(Light::point(Vec3::new(30.0, 50.0, -25.0)));
+    scene.add_light(Light::point(Vec3::new(30.0, 20.0, 30.0)));
+
+    for s in &args.point_lights {
+        let v = parse_floats(s, "point-light", &[7]);
+        scene.add_light(Light::Point {
+            position: Vec3::new(v[0], v[1], v[2]),
+            color: Vec3::new(v[3], v[4], v[5]),
+            intensity: v[6],
+        });
+    }
+    for s in &args.rect_lights {
+        let v = parse_floats(s, "rect-light", &[13, 14]);
+        let two_sided = v.get(13).map(|x| *x != 0.0).unwrap_or(false);
+        scene.add_light(Light::Rect {
+            center: Vec3::new(v[0], v[1], v[2]),
+            u: Vec3::new(v[3], v[4], v[5]),
+            v: Vec3::new(v[6], v[7], v[8]),
+            color: Vec3::new(v[9], v[10], v[11]),
+            intensity: v[12],
+            two_sided,
+        });
+    }
+    for s in &args.sphere_lights {
+        let v = parse_floats(s, "sphere-light", &[8]);
+        scene.add_light(Light::Sphere {
+            center: Vec3::new(v[0], v[1], v[2]),
+            radius: v[3],
+            color: Vec3::new(v[4], v[5], v[6]),
+            intensity: v[7],
+        });
+    }
+    for s in &args.box_lights {
+        let v = parse_floats(s, "box-light", &[14]);
+        scene.add_light(Light::Box {
+            center: Vec3::new(v[0], v[1], v[2]),
+            half_extents: Vec3::new(v[3], v[4], v[5]),
+            // Normalise the input quaternion defensively — small
+            // floating-point drift in user-supplied rotations would
+            // otherwise show up as a slow shear of the box.
+            rotation: Quat::from_xyzw(v[6], v[7], v[8], v[9]).normalize(),
+            color: Vec3::new(v[10], v[11], v[12]),
+            intensity: v[13],
+        });
+    }
 
     if let Some(splat_path) = &args.splat_output {
         println!("GPU splat generation...");
@@ -252,7 +361,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keep_glossy_sh: args.sh_keep_glossy,
             seed: scene_seed,
         };
-        let gaussians = generate_splats_gpu(&scene, &config)?;
+
+        let gaussians = if args.train {
+            println!(
+                "Training enabled: {} iterations, {} reference views at {}×{}",
+                args.train_iters, args.train_views, args.train_width, args.train_height,
+            );
+            let train_cfg = TrainConfig {
+                iterations: args.train_iters,
+                max_splats: args.train_max_splats,
+                reference: BakeConfig {
+                    views: args.train_views,
+                    width: args.train_width,
+                    height: args.train_height,
+                    ..BakeConfig::default()
+                },
+                seed: config,
+                // Inria-style per-attribute lrs — position needs a noticeably
+                // higher rate than the other channels to escape its forward-fit
+                // start; SH / opacity / scale stay conservative.
+                adam_pos: AdamConfig {
+                    lr: 1.6e-4,
+                    ..AdamConfig::default()
+                },
+                adam_attr: AdamConfig::default(),
+            };
+            let splats = run_training(&scene, &train_cfg)?;
+            splats.to_gaussians()
+        } else {
+            generate_splats_gpu(&scene, &config)?
+        };
         let path = std::path::Path::new(splat_path);
         println!("Writing {} gaussians to {}...", gaussians.len(), splat_path);
         write_ply(path, &gaussians)?;
@@ -266,10 +404,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => LightSampling::One,
         };
 
+        let (camera_pos, camera_target, camera_up) = RenderConfig::default_camera();
         let config = RenderConfig {
             width: WIDTH as u32,
             height: HEIGHT as u32,
             fov: FOV,
+            camera_pos,
+            camera_target,
+            camera_up,
             aa_samples: args.aa_samples,
             max_depth: args.max_depth,
             reflection_depth: args.reflection_depth,
@@ -287,6 +429,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Image saved as output.png");
     }
     Ok(())
+}
+
+/// Parse a comma-separated list of floats. `allowed_lens` is the set of
+/// acceptable token counts — multiple values let an optional trailing
+/// boolean flag (encoded as `0`/`1`) coexist with a fixed prefix.
+/// Bails out with a clear panic message so CLI typos surface loudly
+/// instead of silently picking a wrong default.
+fn parse_floats(s: &str, flag: &str, allowed_lens: &[usize]) -> Vec<f32> {
+    let parts: Vec<f32> = s
+        .split(',')
+        .map(|t| {
+            t.trim().parse::<f32>().unwrap_or_else(|_| {
+                panic!("--{flag}: cannot parse '{t}' as float (input: {s:?})")
+            })
+        })
+        .collect();
+    if !allowed_lens.contains(&parts.len()) {
+        panic!(
+            "--{flag}: expected {} float tokens, got {} (input: {:?})",
+            allowed_lens
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("/"),
+            parts.len(),
+            s
+        );
+    }
+    parts
 }
 
 /// Add randomized objects to the scene.

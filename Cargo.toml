@@ -8,6 +8,7 @@ members = [
     "crates/nano-gpu",
     "crates/nano-render",
     "crates/nano-splat",
+    "crates/nano-optimize",
 ]
 # splat-ref is the CPU reference implementation, kept as a source-only doc tree.
 # It references the old monolithic `crate::renderer::*` paths from before the
@@ -31,15 +32,22 @@ shaderc   = "0.10"
 bytemuck  = { version = "1.25", features = ["derive"] }
 indicatif = "0.18"
 gltf      = "1.4"
+# `nano-optimize` uses wgpu for its differentiable rasteriser; the raytracer
+# crates stay on `ash` because they need stable hardware ray-query
+# (VK_KHR_ray_query). When wgpu's RAY_QUERY moves out of experimental we can
+# consolidate — see WGPU_RESEARCH.md.
+wgpu      = "29"
+pollster  = "0.4"
 
 # In-workspace crates (referenced by path so the bin and crates pick them up).
-gpu-mem      = { path = "crates/gpu-mem" }
-nano-core    = { path = "crates/nano-core" }
-nano-io      = { path = "crates/nano-io" }
-nano-shaders = { path = "crates/nano-shaders" }
-nano-gpu     = { path = "crates/nano-gpu" }
-nano-render  = { path = "crates/nano-render" }
-nano-splat   = { path = "crates/nano-splat" }
+gpu-mem       = { path = "crates/gpu-mem" }
+nano-core     = { path = "crates/nano-core" }
+nano-io       = { path = "crates/nano-io" }
+nano-shaders  = { path = "crates/nano-shaders" }
+nano-gpu      = { path = "crates/nano-gpu" }
+nano-render   = { path = "crates/nano-render" }
+nano-splat    = { path = "crates/nano-splat" }
+nano-optimize = { path = "crates/nano-optimize" }
 
 # ── Binary package at workspace root ────────────────────────────────────────
 
@@ -55,11 +63,12 @@ name = "nanotracer-rs"
 path = "src/main.rs"
 
 [dependencies]
-nano-core   = { workspace = true }
-nano-io     = { workspace = true }
-nano-render = { workspace = true }
-nano-splat  = { workspace = true }
-gpu-mem     = { workspace = true }
-glam        = { workspace = true }
-clap        = { workspace = true }
-fastrand    = { workspace = true }
+nano-core     = { workspace = true }
+nano-io       = { workspace = true }
+nano-render   = { workspace = true }
+nano-splat    = { workspace = true }
+nano-optimize = { workspace = true }
+gpu-mem       = { workspace = true }
+glam          = { workspace = true }
+clap          = { workspace = true }
+fastrand      = { workspace = true }

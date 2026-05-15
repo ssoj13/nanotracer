@@ -4,9 +4,16 @@ use glam::Vec3;
 use nano_core::geometry::Geometry;
 use nano_core::material::{checkerboard_material, Material};
 use nano_core::mesh::Mesh;
-use nano_core::scene::Scene;
+use nano_core::scene::{Light, Scene};
 
 pub const MATERIAL_FLAG_CHECKERBOARD: u32 = 1;
+
+/// GLSL `LIGHT_*` constants — keep these in sync with `nano-shaders`.
+pub const LIGHT_KIND_POINT: u32 = 0;
+pub const LIGHT_KIND_RECT: u32 = 1;
+pub const LIGHT_KIND_SPHERE: u32 = 2;
+pub const LIGHT_KIND_BOX: u32 = 3;
+pub const LIGHT_KIND_ENV: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Zeroable, Pod)]
@@ -29,6 +36,38 @@ pub struct GpuTriangle {
     pub _pad: u32,
 }
 
+/// 64-byte std430 light record. One per scene light; semantics are
+/// driven by `kind` (see `LIGHT_KIND_*` constants). Per-light emissive
+/// radiance lives in a *parallel* SSBO (`light_radiance`) — this keeps
+/// the geometric record at exactly 64 bytes without bit-packing tricks.
+///
+/// Field layout by kind:
+///
+/// | Kind   | `center`            | `axis_u`         | `axis_v`            |
+/// |--------|---------------------|------------------|---------------------|
+/// | Point  | position.xyz, _     | unused           | unused              |
+/// | Rect   | center.xyz, _       | u.xyz, _         | v.xyz, _            |
+/// | Sphere | center.xyz, radius  | unused           | unused              |
+/// | Box    | center.xyz, _       | rotation (quat)  | half_extents.xyz, _ |
+/// | Env    | unused              | unused           | unused              |
+///
+/// `u` and `v` for `Rect` are the world-space half-extent vectors (not
+/// unit vectors): a 2×3 rectangle whose long side is along +X is
+/// `u = (1, 0, 0), v = (0, 1.5, 0)`.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Zeroable, Pod)]
+pub struct GpuLight {
+    pub kind: u32,
+    pub two_sided: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub center: [f32; 4],
+    pub axis_u: [f32; 4],
+    pub axis_v: [f32; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<GpuLight>() == 64);
+
 #[derive(Debug)]
 pub struct GpuSceneData {
     pub vertices: Vec<[f32; 4]>,
@@ -38,7 +77,83 @@ pub struct GpuSceneData {
     pub tri_cdf: Vec<f32>,
     pub tri_areas: Vec<f32>,
     pub materials: Vec<GpuMaterial>,
-    pub lights: Vec<[f32; 4]>,
+    /// Geometric records (one per scene light, or a single zero pad if
+    /// the scene has no lights — Vulkan rejects zero-byte SSBOs).
+    /// `lights[i]` shares the same index as `light_radiance[i]`.
+    pub lights: Vec<GpuLight>,
+    /// Emitted radiance per light (color · intensity, premultiplied).
+    /// Parallel to `lights`; the w channel is unused / padding.
+    pub light_radiance: Vec<[f32; 4]>,
+    /// Logical light count — distinct from `lights.len()` because the
+    /// buffer is padded to 1 entry when the scene has no lights and no
+    /// environment. Shaders use this for the loop bound.
+    pub light_count: u32,
+}
+
+impl GpuLight {
+    /// Convert a CPU [`Light`] into its 64-byte GPU record. The matching
+    /// radiance entry comes from [`Light::radiance`] on the caller side
+    /// (see `build_gpu_scene_with_detail_boost`).
+    pub fn from_light(light: &Light) -> Self {
+        match light {
+            Light::Point { position, .. } => Self {
+                kind: LIGHT_KIND_POINT,
+                two_sided: 0,
+                _pad0: 0,
+                _pad1: 0,
+                center: [position.x, position.y, position.z, 0.0],
+                axis_u: [0.0; 4],
+                axis_v: [0.0; 4],
+            },
+            Light::Rect {
+                center,
+                u,
+                v,
+                two_sided,
+                ..
+            } => Self {
+                kind: LIGHT_KIND_RECT,
+                two_sided: u32::from(*two_sided),
+                _pad0: 0,
+                _pad1: 0,
+                center: [center.x, center.y, center.z, 0.0],
+                axis_u: [u.x, u.y, u.z, 0.0],
+                axis_v: [v.x, v.y, v.z, 0.0],
+            },
+            Light::Sphere { center, radius, .. } => Self {
+                kind: LIGHT_KIND_SPHERE,
+                two_sided: 0,
+                _pad0: 0,
+                _pad1: 0,
+                center: [center.x, center.y, center.z, *radius],
+                axis_u: [0.0; 4],
+                axis_v: [0.0; 4],
+            },
+            Light::Box {
+                center,
+                half_extents,
+                rotation,
+                ..
+            } => Self {
+                kind: LIGHT_KIND_BOX,
+                two_sided: 0,
+                _pad0: 0,
+                _pad1: 0,
+                center: [center.x, center.y, center.z, 0.0],
+                axis_u: [rotation.x, rotation.y, rotation.z, rotation.w],
+                axis_v: [half_extents.x, half_extents.y, half_extents.z, 0.0],
+            },
+            Light::Env { .. } => Self {
+                kind: LIGHT_KIND_ENV,
+                two_sided: 0,
+                _pad0: 0,
+                _pad1: 0,
+                center: [0.0; 4],
+                axis_u: [0.0; 4],
+                axis_v: [0.0; 4],
+            },
+        }
+    }
 }
 
 impl GpuMaterial {
@@ -131,11 +246,35 @@ pub fn build_gpu_scene_with_detail_boost(
         );
     }
 
-    let lights = scene
+    // Build the GPU light table. If the scene has an environment map but
+    // no explicit `Light::Env`, append an implicit unit-intensity one so
+    // image-based lighting still contributes — matches the pre-refactor
+    // unconditional `eval_env_irradiance` behaviour. The CPU `Scene` is
+    // not mutated; this is a build-time policy.
+    let auto_env = scene.environment.is_some() && !scene.has_env_light();
+    let mut lights: Vec<GpuLight> = scene.lights.iter().map(GpuLight::from_light).collect();
+    let mut light_radiance: Vec<[f32; 4]> = scene
         .lights
         .iter()
-        .map(|l| [l.position.x, l.position.y, l.position.z, 1.0])
-        .collect::<Vec<_>>();
+        .map(|l| {
+            let r = l.radiance();
+            [r.x, r.y, r.z, 0.0]
+        })
+        .collect();
+    if auto_env {
+        let env_light = Light::Env { intensity: 1.0 };
+        lights.push(GpuLight::from_light(&env_light));
+        let r = env_light.radiance();
+        light_radiance.push([r.x, r.y, r.z, 0.0]);
+    }
+    let light_count = lights.len() as u32;
+    // Vulkan rejects zero-byte SSBOs — pad to one zeroed slot when the
+    // scene has no lights and no environment. `light_count` keeps the
+    // logical count so the shader skips the dummy entry.
+    if lights.is_empty() {
+        lights.push(GpuLight::zeroed());
+        light_radiance.push([0.0; 4]);
+    }
 
     let mut tri_cdf = Vec::with_capacity(tri_weights.len());
     let total_weight: f32 = tri_weights.iter().sum();
@@ -156,6 +295,8 @@ pub fn build_gpu_scene_with_detail_boost(
         tri_areas,
         materials,
         lights,
+        light_radiance,
+        light_count,
     }
 }
 
@@ -275,4 +416,68 @@ fn checkerboard_plane_mesh() -> Mesh {
     let indices = vec![[0, 1, 2], [0, 2, 3]];
 
     Mesh::with_normals(vertices, indices, normals)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::{Quat, Vec3};
+
+    #[test]
+    fn gpu_light_layout_is_64_bytes_aligned_16() {
+        assert_eq!(core::mem::size_of::<GpuLight>(), 64);
+        assert_eq!(core::mem::align_of::<GpuLight>(), 16);
+    }
+
+    #[test]
+    fn from_light_kind_dispatch() {
+        let p = Light::Point {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            color: Vec3::ONE,
+            intensity: 1.0,
+        };
+        let g = GpuLight::from_light(&p);
+        assert_eq!(g.kind, LIGHT_KIND_POINT);
+        assert_eq!(g.center, [1.0, 2.0, 3.0, 0.0]);
+
+        let r = Light::Rect {
+            center: Vec3::new(0.0, 5.0, 0.0),
+            u: Vec3::new(2.0, 0.0, 0.0),
+            v: Vec3::new(0.0, 0.0, 3.0),
+            color: Vec3::ONE,
+            intensity: 1.0,
+            two_sided: true,
+        };
+        let g = GpuLight::from_light(&r);
+        assert_eq!(g.kind, LIGHT_KIND_RECT);
+        assert_eq!(g.two_sided, 1);
+        assert_eq!(g.axis_u, [2.0, 0.0, 0.0, 0.0]);
+        assert_eq!(g.axis_v, [0.0, 0.0, 3.0, 0.0]);
+
+        let s = Light::Sphere {
+            center: Vec3::ZERO,
+            radius: 4.0,
+            color: Vec3::ONE,
+            intensity: 1.0,
+        };
+        let g = GpuLight::from_light(&s);
+        assert_eq!(g.kind, LIGHT_KIND_SPHERE);
+        assert_eq!(g.center[3], 4.0);
+
+        let b = Light::Box {
+            center: Vec3::ZERO,
+            half_extents: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::IDENTITY,
+            color: Vec3::ONE,
+            intensity: 1.0,
+        };
+        let g = GpuLight::from_light(&b);
+        assert_eq!(g.kind, LIGHT_KIND_BOX);
+        assert_eq!(g.axis_u, [0.0, 0.0, 0.0, 1.0]); // identity quat (x,y,z,w)
+        assert_eq!(g.axis_v, [1.0, 2.0, 3.0, 0.0]);
+
+        let e = Light::Env { intensity: 2.0 };
+        let g = GpuLight::from_light(&e);
+        assert_eq!(g.kind, LIGHT_KIND_ENV);
+    }
 }

@@ -15,13 +15,29 @@ use nano_gpu::vk_runtime::{AccelResource, BufferResource, ImageResource, VkConte
 pub struct RenderConfig {
     pub width: u32,
     pub height: u32,
+    /// Vertical FoV in radians.
     pub fov: f32,
+    /// World-space camera position.
+    pub camera_pos: Vec3,
+    /// World-space look-at target.
+    pub camera_target: Vec3,
+    /// World-space up vector. Use `Vec3::Y` for most setups; switch to `X`
+    /// near the poles of an orbit to avoid Gimbal-style flips.
+    pub camera_up: Vec3,
     pub aa_samples: u32,
     pub max_depth: i32,
     pub reflection_depth: i32,
     pub refraction_depth: i32,
     pub tonemap: bool,
     pub light_sampling: LightSampling,
+}
+
+impl RenderConfig {
+    /// Default look-down-the-`-Z`-from-origin pose used by the original
+    /// tinyraytracer-style demo scene. Equivalent to no camera at all.
+    pub fn default_camera() -> (Vec3, Vec3, Vec3) {
+        (Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), Vec3::Y)
+    }
 }
 
 #[repr(C)]
@@ -44,10 +60,21 @@ struct GpuParams {
     fov: f32,
     _pad0: u32,
     _pad1: u32,
+    // Explicit padding so the following `vec4[9]` lands on a 16-byte
+    // boundary as required by std140 — Rust `repr(C)` packs `u32` fields
+    // tightly (68 B so far) and won't auto-pad to match the GLSL block.
+    _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
     /// Lambertian-convolved env irradiance (degree-2 SH, 9 vec4 entries).
     /// xyz is RGB, w unused — pre-convolved on CPU by
     /// `nano_core::environment::EnvironmentMap::irradiance_sh`.
     irradiance_sh: [[f32; 4]; 9],
+    /// World-from-camera 4×4 matrix (the inverse of the view matrix).
+    /// The shader's pinhole ray generation produces a camera-space
+    /// direction; this matrix carries it back into world space, plus
+    /// supplies the world-space ray origin (camera position).
+    inv_view: [[f32; 4]; 4],
 }
 
 pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn std::error::Error>> {
@@ -115,6 +142,11 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
 
     let lights_buffer = ctx.create_buffer_with_data(
         &gpu_scene.lights,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
+    )?;
+
+    let light_radiance_buffer = ctx.create_buffer_with_data(
+        &gpu_scene.light_radiance,
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
 
@@ -188,7 +220,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         max_depth: config.max_depth.max(1) as u32,
         reflection_depth: config.reflection_depth.max(0) as u32,
         refraction_depth: config.refraction_depth.max(0) as u32,
-        light_count: gpu_scene.lights.len() as u32,
+        light_count: gpu_scene.light_count,
         light_sampling: config.light_sampling.as_u32(),
         use_env: if env_data.use_sky { 0 } else { 1 },
         use_sky: if env_data.use_sky { 1 } else { 0 },
@@ -199,7 +231,16 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         fov: config.fov,
         _pad0: 0,
         _pad1: 0,
+        _pad2: 0,
+        _pad3: 0,
+        _pad4: 0,
+        // IBL strength is now expressed via `Light::Env { intensity }` —
+        // the env-irradiance SH is uploaded at full physical scale and
+        // multiplied by the explicit env-light intensity in the shader.
         irradiance_sh: env_data.irradiance_sh,
+        inv_view: glam::Mat4::look_at_rh(config.camera_pos, config.camera_target, config.camera_up)
+            .inverse()
+            .to_cols_array_2d(),
     };
 
     let params_buffer = ctx.create_buffer_with_data(
@@ -257,7 +298,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 6,
+            descriptor_count: 7,
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -306,6 +347,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         &params_buffer,
         env_sampler,
         &env_image,
+        &light_radiance_buffer,
     );
 
     let t_pipeline = phase_start.elapsed();
@@ -424,6 +466,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         ctx.destroy_buffer(&params_buffer);
         ctx.destroy_buffer(&output_buffer);
         ctx.destroy_buffer(&lights_buffer);
+        ctx.destroy_buffer(&light_radiance_buffer);
         ctx.destroy_buffer(&tri_materials_buffer);
         ctx.destroy_buffer(&materials_buffer);
         ctx.destroy_buffer(&indices_buffer);
@@ -521,6 +564,13 @@ fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSe
             stage_flags: vk::ShaderStageFlags::COMPUTE,
             ..Default::default()
         },
+        vk::DescriptorSetLayoutBinding {
+            binding: 10,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+            ..Default::default()
+        },
     ];
 
     unsafe {
@@ -550,6 +600,7 @@ fn write_descriptor_set(
     params: &BufferResource,
     sampler: vk::Sampler,
     env_image: &ImageResource,
+    light_radiance: &BufferResource,
 ) {
     let accel_info = vk::WriteDescriptorSetAccelerationStructureKHR {
         acceleration_structure_count: 1,
@@ -603,6 +654,12 @@ fn write_descriptor_set(
         image_view: env_image.view,
         image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         sampler,
+    };
+
+    let light_radiance_info = vk::DescriptorBufferInfo {
+        buffer: light_radiance.buffer,
+        offset: 0,
+        range: light_radiance.size,
     };
 
     let accel_write = vk::WriteDescriptorSet {
@@ -688,6 +745,14 @@ fn write_descriptor_set(
             p_image_info: &env_info,
             ..Default::default()
         },
+        vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
+            dst_binding: 10,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: 1,
+            p_buffer_info: &light_radiance_info,
+            ..Default::default()
+        },
     ];
 
     unsafe { device.update_descriptor_sets(&writes, &[]) };
@@ -706,7 +771,8 @@ layout(set = 0, binding = 3, std430) readonly buffer Normals { vec4 normals[]; }
 layout(set = 0, binding = 4, std430) readonly buffer Triangles { uvec4 tris[]; };
 layout(set = 0, binding = 5, std430) readonly buffer Materials { Material materials[]; };
 layout(set = 0, binding = 6, std430) readonly buffer TriMaterials { uint tri_materials[]; };
-layout(set = 0, binding = 7, std430) readonly buffer Lights { vec4 lights[]; };
+layout(set = 0, binding = 7, std430) readonly buffer Lights { GpuLight lights[]; };
+layout(set = 0, binding = 10, std430) readonly buffer LightRadiance { vec4 light_radiance[]; };
 layout(set = 0, binding = 8) uniform Params {
     uint width;
     uint height;
@@ -726,6 +792,7 @@ layout(set = 0, binding = 8) uniform Params {
     uint _pad0;
     uint _pad1;
     vec4 irradiance_sh[9];
+    mat4 inv_view;
 } params;
 layout(set = 0, binding = 9) uniform sampler2D env_map;
 "#;
@@ -764,7 +831,10 @@ void main() {
 
         float dir_x = (float(gid.x) + jitter_x) - half_w;
         float dir_y = -(float(gid.y) + jitter_y) + half_h;
-        vec3 ray_dir = normalize(vec3(dir_x, dir_y, dir_z));
+        vec3 cam_dir = normalize(vec3(dir_x, dir_y, dir_z));
+        // Camera-space → world-space via the inverse-view matrix.
+        vec3 ray_dir = normalize((params.inv_view * vec4(cam_dir, 0.0)).xyz);
+        vec3 ray_origin = (params.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 
         vec3 stack_origin[MAX_STACK];
         vec3 stack_dir[MAX_STACK];
@@ -772,7 +842,7 @@ void main() {
         int stack_depth[MAX_STACK];
         int stack_size = 0;
 
-        stack_origin[stack_size] = vec3(0.0, 0.0, 0.0);
+        stack_origin[stack_size] = ray_origin;
         stack_dir[stack_size] = ray_dir;
         stack_weight[stack_size] = vec3(1.0);
         stack_depth[stack_size] = 0;
@@ -820,50 +890,61 @@ void main() {
                 diffuse_color = checker_color(hit_pos);
             }
 
-            float diffuse_intensity = 0.0;
-            float specular_intensity = 0.0;
+            vec3 diffuse_radiance = vec3(0.0);
+            vec3 specular_radiance = vec3(0.0);
 
             // GGX setup: roughness from Phong exponent, Fresnel F0 from ks.
             float alpha_ggx = phong_to_alpha(mat.specular_exponent);
             vec3 view = -dir;
 
             if (params.light_count > 0u) {
+                uint base_seed = gid.x * 1973u + gid.y * 9277u + s * 26699u + uint(depth) * 104729u;
                 if (params.light_sampling == 0u) {
+                    // All-lights mode: sample each light once per shade.
                     for (uint li = 0u; li < params.light_count; ++li) {
-                        vec3 light_pos = lights[li].xyz;
-                        vec3 light_dir = normalize(light_pos - hit_pos);
-                        float light_dist = length(light_pos - hit_pos);
-                        vec3 shadow_origin = offset_origin(hit_pos, normal, light_dir);
-                        float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
-                        if (visibility <= 0.0) {
+                        uint seed_li = base_seed + li * 2654435761u;
+                        vec2 r = vec2(rand01(seed_li), rand01(seed_li * 0x9E3779B9u + 1u));
+                        LightSample ls = sample_light(li, hit_pos, normal, r);
+                        if (ls.kind == LIGHT_ENV) {
+                            // Pre-convolved cos-weighted env irradiance — no shadow ray.
+                            diffuse_radiance += ls.radiance;
                             continue;
                         }
-                        diffuse_intensity += max(dot(light_dir, normal), 0.0);
-                        specular_intensity += ggx_specular(normal, view, light_dir, alpha_ggx, mat.albedo.y);
+                        vec3 shadow_origin = offset_origin(hit_pos, normal, ls.dir);
+                        float visibility = shadow_ray(shadow_origin, ls.dir, ls.dist - EPS);
+                        if (visibility <= 0.0) { continue; }
+                        float cos_x = max(dot(ls.dir, normal), 0.0);
+                        diffuse_radiance += ls.radiance * cos_x;
+                        specular_radiance += ls.radiance * ggx_specular(normal, view, ls.dir, alpha_ggx, mat.albedo.y);
                     }
                 } else {
-                    uint seed = gid.x * 1973u + gid.y * 9277u + s * 26699u + uint(depth) * 104729u;
-                    uint li = min(uint(rand01(seed) * float(params.light_count)), params.light_count - 1u);
-                    float light_weight = float(params.light_count);
-
-                    vec3 light_pos = lights[li].xyz;
-                    vec3 light_dir = normalize(light_pos - hit_pos);
-                    float light_dist = length(light_pos - hit_pos);
-                    vec3 shadow_origin = offset_origin(hit_pos, normal, light_dir);
-                    float visibility = shadow_ray(shadow_origin, light_dir, light_dist - EPS);
-                    if (visibility > 0.0) {
-                        diffuse_intensity += max(dot(light_dir, normal), 0.0) * light_weight;
-                        specular_intensity += ggx_specular(normal, view, light_dir, alpha_ggx, mat.albedo.y) * light_weight;
+                    // One-light MC mode: pick one uniformly, weight by N.
+                    uint li = min(uint(rand01(base_seed) * float(params.light_count)), params.light_count - 1u);
+                    float w_pick = float(params.light_count);
+                    uint seed_li = base_seed + li * 2654435761u + 7u;
+                    vec2 r = vec2(rand01(seed_li), rand01(seed_li * 0x9E3779B9u + 1u));
+                    LightSample ls = sample_light(li, hit_pos, normal, r);
+                    if (ls.kind == LIGHT_ENV) {
+                        diffuse_radiance += ls.radiance * w_pick;
+                    } else {
+                        vec3 shadow_origin = offset_origin(hit_pos, normal, ls.dir);
+                        float visibility = shadow_ray(shadow_origin, ls.dir, ls.dist - EPS);
+                        if (visibility > 0.0) {
+                            float cos_x = max(dot(ls.dir, normal), 0.0);
+                            diffuse_radiance += ls.radiance * cos_x * w_pick;
+                            specular_radiance += ls.radiance * ggx_specular(normal, view, ls.dir, alpha_ggx, mat.albedo.y) * w_pick;
+                        }
                     }
                 }
             }
 
+            // Multi-scattering compensation for energy lost at high roughness.
+            specular_radiance *= ggx_msc_boost(alpha_ggx, mat.albedo.y);
+
             // GGX already absorbs Fresnel F0 — no separate ks/spec_norm needed.
-            // Add IBL diffuse (cosine-convolved env SH) so surfaces are not
-            // pitch-black where direct lights don't reach.
-            vec3 ibl = eval_env_irradiance(normal);
-            vec3 local_color = diffuse_color * mat.albedo.x * (diffuse_intensity + ibl);
-            local_color += vec3(1.0) * specular_intensity;
+            // Env IBL contribution (when present) arrives through the light
+            // loop as a `LIGHT_ENV` sample, so no separate ambient add here.
+            vec3 local_color = diffuse_color * mat.albedo.x * diffuse_radiance + specular_radiance;
             sample_color += weight * local_color;
 
             if (depth >= max_depth) {

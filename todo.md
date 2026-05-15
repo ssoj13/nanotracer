@@ -48,11 +48,73 @@ prune as they age.
 
 ## Active
 
-_nothing in flight — pick from the parked list below_
+**Plan A — full 3DGS gradient-based optimisation.** Wired in `nano-optimize`
+crate (wgpu 29). Phase A1 scaffolding landed; rasteriser + backward pass +
+loss + densify still ahead.
+
+- [x] **A1 Scaffolding** — `nano-optimize` crate, `SplatBuffer`,
+      `AdamState`, multi-view Fibonacci-sphere reference baking via
+      `nano-render`, training-loop skeleton, `--train` CLI flag + tuning
+      flags (`--train-iters`, `--train-views`, `--train-width`,
+      `--train-height`, `--train-max-splats`).
+- [x] **Area lights + IBL as `Light::Env`.** `Light` is now an enum
+      `{Point, Rect, Sphere, Box, Env}` in `nano-core` with `area()`,
+      `radiance()`, `sample()`. 64-byte `GpuLight` in `nano-gpu` paired
+      with a `light_radiance` SSBO. Unified `sample_light` GLSL helper
+      in `nano-shaders` dispatches by kind (point: unit-radiance no
+      falloff; rect/box: uniform-area MC; sphere: solid-angle MC;
+      env: cosine-convolved SH). CLI: `--point-light`, `--rect-light`,
+      `--sphere-light`, `--box-light`, `--env-light` (replaces the old
+      `--ibl-strength` knob — IBL intensity now flows through the
+      explicit env-light).
+- [ ] **A2 Differentiable forward rasteriser** — tile-based α-blending
+      front-to-back in WGSL compute, view/proj projection of splats,
+      forward pass producing predicted frames. Sub-steps:
+      - A2.1 — `project_gaussians.wgsl`: world → screen-space ellipse
+        (2D conic from 3D Σ projection), per-splat depth + radius.
+      - A2.2 — Tile binning: per-splat tile-bbox → duplicated splat
+        list, key = (tile_id, depth), radix-sort.
+      - A2.3 — `rasterize.wgsl`: per-tile workgroup α-blends its sorted
+        splat list front-to-back into `predicted: rgba16f`.
+      - A2.4 — Integration test: single analytic-Gaussian round-trip,
+        multi-splat reference parity against a CPU oracle.
+- [ ] **A3 Backward pass** — gradients through α-blend back to per-splat
+      (pos, rot, scale, opacity, sh). Validate with finite differences.
+- [ ] **A4 Loss** — L1 + SSIM photometric loss vs reference views, grad
+      backprop into Adam state.
+- [ ] **A5 Densify-and-prune** — split high-gradient splats, prune
+      low-opacity / low-importance; cap at `--train-max-splats`.
+
+**Plan B — Splat viewer.** Built on top of Plan A's WGSL rasteriser.
+"Сразу нормальный" — no half-jobs, proper navigation, depth-sort, env
+background, gamma-correct output. Blocked on A2 (shared kernel).
+
+- [ ] **B1 Standalone PLY viewer.** New crate `nano-view`. winit +
+      wgpu surface, loads a `.ply`, presents in a window. Camera:
+      orbit (LMB rotate, RMB pan, scroll zoom) + WASD fly mode + FoV
+      slider. Per-frame radix depth-sort by camera direction. HUD:
+      FPS, frame-time, splat count, current camera pose. Env-map
+      background reuses `nano-core::environment`. CLI: `--view scene.ply`.
+      Reuses A2's `rasterize.wgsl` verbatim — no duplicate kernels.
+- [ ] **B2 Training-time live preview.** Reuse B1's window + pipeline.
+      Flag `--view-training`: during `train()` the window shows the
+      current predicted frame from a fixed reference camera, refreshed
+      every N iterations. Surface present runs on a separate command
+      pool from training compute so they don't serialise. Side panel:
+      live loss curve (L1 + SSIM), iteration counter, splat-count
+      trend. Useful for spotting divergence early.
+- [x] **A1 extension — multi-view camera in renderer.** `RenderConfig`
+      now carries `camera_pos / camera_target / camera_up`; the shader
+      consumes `inv_view`; `bake_references` produces distinct frames.
+
+Multi-scattering compensation (Heitz/Hill) landed earlier as
+`nano_shaders::ggx_msc_boost`.
 
 ## 🟧 Visible improvements
 
-_(empty — all landed)_
+_(empty — Plan A subsumes the per-roughness mip-chain idea via
+differentiable rasterisation; if a non-PBR demo needs IBL specular fast
+it can revisit.)_
 
 ## 🟨 Polish
 
@@ -60,13 +122,12 @@ _(empty — all landed)_
 
 ## 🟩 Long horizon
 
-- [ ] Multi-scattering compensation for GGX (Heitz / Hill) — current
-      single-scatter BRDF is a touch dim at high roughness.
 - [ ] Per-roughness env-map mip chain for IBL specular (split-sum
-      approximation à la Real Shading in UE4). Today only IBL **diffuse**
-      is wired; specular reflections still come from `trace_path`.
-- [ ] `wgpu` migration. Blocked on RT extension stabilising; see
-      `WGPU_RESEARCH.md` for the unblock criteria.
+      à la Real Shading in UE4). Only matters if Plan A doesn't ship —
+      direct optimisation captures the same effect physically.
+- [ ] Full `wgpu` consolidation: migrate `nano-render` / `nano-gpu` /
+      `nano-splat` off ash once `EXPERIMENTAL_RAY_QUERY` stabilises.
+      See `WGPU_RESEARCH.md`.
 - [ ] `no-std` Rust subset for ARM SBC targets. Path: lift `nano-core`
       to `#![no_std]`, keep `nano-gpu`/`nano-shaders` host-only.
 
