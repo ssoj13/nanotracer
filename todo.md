@@ -105,8 +105,13 @@ loss + densify still ahead.
       - L1 + SSIM photometric loss is a quality knob that requires a
         separate 5-pass Gaussian-blur SSIM kernel + backward. Tracked
         as a follow-up under "🟧 Visible improvements" below.
-- [ ] **A5 Densify-and-prune** — split high-gradient splats, prune
-      low-opacity / low-importance; cap at `--train-max-splats`.
+- [x] **A5 Densify-and-prune** — high-gradient splats clone (small) or
+      split (large), low-opacity splats are pruned; capped at
+      `--train-max-splats`. Adam moments + grad accumulator + GPU
+      buffers reallocate / swap_remove in lockstep. Both `prune` and
+      `densify` covered by unit tests; the grad-threshold for densify
+      is a per-scene tuning knob (Inria-style 2D mean-grad ≠ our 3D
+      L1 metric in absolute magnitude).
 
 **Plan B — Splat viewer.** Built on top of Plan A's WGSL rasteriser.
 "Сразу нормальный" — no half-jobs, proper navigation, depth-sort, env
