@@ -21,6 +21,7 @@
 pub mod adam;
 pub mod adam_gpu;
 pub mod gpu;
+pub mod loss;
 pub mod prefix_scan;
 pub mod radix_sort;
 pub mod raster;

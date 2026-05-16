@@ -46,12 +46,19 @@ pub struct TrainConfig {
     pub seed: SplatConfigGpu,
     pub adam_pos: AdamConfig,
     pub adam_attr: AdamConfig,
+    /// Blend factor for the combined MSE + SSIM loss:
+    /// `L = (1 − λ) · MSE + λ · (1 − SSIM)`. `λ = 0` reproduces the
+    /// pure-MSE behaviour bit-for-bit; the Inria 3DGS default is `0.2`.
+    pub ssim_lambda: f32,
 }
 
 /// Run the optimisation loop and return the final splat buffer.
 ///
 /// `on_iter` is invoked at the end of every iteration with
-/// `(iter_index, &updated_splats, mse_for_this_iter)`. Pass a no-op
+/// `(iter_index, &updated_splats, combined_loss_for_this_iter)`. The
+/// scalar is the full objective `(1 − λ) · MSE + λ · (1 − SSIM)` the
+/// optimiser is descending — *not* MSE alone, so the viewer's loss
+/// plot reflects what training is actually minimising. Pass a no-op
 /// closure for the headless training path; the viewer wires this up
 /// to publish a snapshot into a shared `RwLock` so the live preview
 /// stays in sync with the training thread.
@@ -172,20 +179,19 @@ pub fn train<F: FnMut(u32, &SplatBuffer, f32)>(
         // Read back the predicted frame; compare to reference radiance.
         let pred: Vec<[f32; 4]> = ctx.readback(&predicted, (width * height) as usize);
         let pred_rgb: Vec<Vec3> = pred.iter().map(|p| Vec3::new(p[0], p[1], p[2])).collect();
-        let mse = mean_squared_error(&pred_rgb, &view.pixels);
 
-        // Backward pass: MSE → dL/dC, then α-blend backward, then
-        // project backward. Per-pixel loss gradient for MSE over N
-        // pixels × 3 channels: dL/dC = 2·(predicted - target) / (3·W·H).
-        let n_scalars = (width as f32) * (height as f32) * 3.0;
-        let dl_dc_vec: Vec<[f32; 4]> = pred_rgb
-            .iter()
-            .zip(view.pixels.iter())
-            .map(|(p, t)| {
-                let d = (*p - *t) * (2.0 / n_scalars);
-                [d.x, d.y, d.z, 0.0]
-            })
-            .collect();
+        // Combined loss `L = (1 − λ) · MSE + λ · (1 − SSIM)`. The
+        // returned `dl_dc_vec3` already carries the λ-weighted sum of
+        // both component gradients (linearity of derivatives) so the
+        // GPU backward pass needs no further blending.
+        let (loss_total, loss_mse, loss_ssim, dl_dc_vec3) = crate::loss::combined_loss_grad(
+            &pred_rgb,
+            &view.pixels,
+            width,
+            height,
+            cfg.ssim_lambda,
+        );
+        let dl_dc_vec: Vec<[f32; 4]> = dl_dc_vec3.iter().map(|d| [d.x, d.y, d.z, 0.0]).collect();
         ctx.queue
             .write_buffer(&dl_dc_buf, 0, bytemuck::cast_slice(&dl_dc_vec));
         rasterizer.zero_projected_grad(&ctx, &projected_grad, gpu_splats.n);
@@ -359,7 +365,7 @@ pub fn train<F: FnMut(u32, &SplatBuffer, f32)>(
         // snapshot of MSE. The splat buffer is only round-tripped at
         // prune/densify cadence; intermediate iters publish the last
         // fresh CPU mirror (or the initial seed buffer otherwise).
-        on_iter(iter, &splats, mse);
+        on_iter(iter, &splats, loss_total);
 
         if iter % 100 == 0 || iter + 1 == cfg.iterations {
             // Gradient-norm diagnostics — pos / opacity / sh_dc / scale.
@@ -375,7 +381,7 @@ pub fn train<F: FnMut(u32, &SplatBuffer, f32)>(
             let norm_dc = grad_norm_vec4(&g_dc);
             let norm_scale = grad_norm_vec4(&g_scale);
             eprintln!(
-                "[train] iter {iter:>5} | view {:>3}/{} | mse {mse:.4} | grad‖pos‖={norm_pos:.2e} ‖op‖={norm_op:.2e} ‖dc‖={norm_dc:.2e} ‖scale‖={norm_scale:.2e} | {} splats",
+                "[train] iter {iter:>5} | view {:>3}/{} | mse {loss_mse:.4} ssim {loss_ssim:.4} total {loss_total:.4} | grad‖pos‖={norm_pos:.2e} ‖op‖={norm_op:.2e} ‖dc‖={norm_dc:.2e} ‖scale‖={norm_scale:.2e} | {} splats",
                 iter as usize % refs.len(),
                 refs.len(),
                 gpu_splats.n,
@@ -392,18 +398,6 @@ pub fn train<F: FnMut(u32, &SplatBuffer, f32)>(
         final_splats.len()
     );
     Ok(final_splats)
-}
-
-/// Mean squared error over `Vec3` framebuffers — sums squared per-
-/// channel differences, divides by total scalar count.
-fn mean_squared_error(a: &[Vec3], b: &[Vec3]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    let mut sum = 0.0_f64;
-    for (av, bv) in a.iter().zip(b.iter()) {
-        let d = *av - *bv;
-        sum += (d.x * d.x + d.y * d.y + d.z * d.z) as f64;
-    }
-    (sum / (a.len() as f64 * 3.0)) as f32
 }
 
 /// Inria-style densify: high-gradient splats either clone (small

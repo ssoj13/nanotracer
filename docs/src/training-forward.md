@@ -181,3 +181,36 @@ pass to reconstruct T without storing per-splat intermediates.
   guaranteed by the dilation, `power` is non-positive analytically;
   the check protects against any future bug that breaks the
   invariant.
+
+## Loss — combined MSE + SSIM
+
+After readback of the predicted frame we evaluate the Inria-style
+combined objective in `nano_optimize::loss`:
+
+\\[
+L = (1 - \lambda)\,\mathrm{MSE}(\hat{C}, C^*) + \lambda\,\bigl(1 - \mathrm{SSIM}(\hat{C}, C^*)\bigr)
+\\]
+
+- `MSE` — mean squared per-pixel RGB. Same definition as the old
+  pure-MSE path; gradient is `dL/dC = 2(pred − target) / (W·H·3)`.
+- `SSIM` — Wang 2004 structural similarity over an **11×11 separable
+  Gaussian window** with `σ = 1.5`. Stabiliser constants
+  `C1 = (0.01)² = 1e-4` and `C2 = (0.03)² = 9e-4`. Reflection padding
+  on the window edges, average over R/G/B channels.
+- `λ ∈ [0, 1]` — `--ssim-lambda` flag. Inria default is `0.2`. At
+  `λ = 0` the pass is bit-equivalent to the pre-SSIM path (the SSIM
+  convolutions are skipped entirely).
+
+MSE alone plateaus once the splat cloud is locally correct: every
+pixel's mean is roughly right but the local structure (edges,
+gradients, fine texture) is smeared. SSIM scores those local
+windows, so adding a small `λ` carries the optimiser past that
+plateau in the last ~20% of training without breaking the bulk of
+the L2-driven convergence earlier on.
+
+Gradient flow: the analytic `dSSIM/dx` simplifies to a cascade of
+three Gaussian smoothings over per-pixel quotient-rule coefficients
+(see `loss::ssim_loss_grad_channel`). The combined gradient is the
+λ-weighted sum of the MSE and SSIM gradients (linearity of
+derivatives), so the GPU backward pass receives a single `dL/dC`
+buffer just as before.

@@ -182,6 +182,13 @@ struct Args {
     #[arg(long = "train-max-splats", default_value_t = 5_000_000)]
     train_max_splats: usize,
 
+    /// SSIM blend factor for combined loss
+    /// `L = (1 − λ) · MSE + λ · (1 − SSIM)`. 0.0 = pure MSE, 1.0 = pure
+    /// SSIM. Inria 3DGS default is 0.2. Range-checked at parse time so
+    /// out-of-range values fail loudly instead of silently clamping.
+    #[arg(long = "ssim-lambda", default_value_t = 0.2, value_parser = parse_unit_interval)]
+    ssim_lambda: f32,
+
     /// Add mesh primitives: cube, pyramid, torus, all
     #[arg(long = "mesh")]
     mesh: Option<String>,
@@ -219,6 +226,18 @@ struct Args {
     /// densify reshape the cloud. Implies `--train`.
     #[arg(long = "view-training", default_value_t = false)]
     view_training: bool,
+}
+
+/// Clap value-parser that accepts only `[0.0, 1.0]` — used by
+/// `--ssim-lambda` so out-of-range values fail loudly at parse time
+/// rather than getting silently clamped inside the loss function.
+fn parse_unit_interval(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a float: {e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be in [0.0, 1.0], got {v}"))
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -414,6 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..AdamConfig::default()
                 },
                 adam_attr: AdamConfig::default(),
+                ssim_lambda: args.ssim_lambda,
             };
             if args.view_training {
                 println!(

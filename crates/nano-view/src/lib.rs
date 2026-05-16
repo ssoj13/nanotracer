@@ -47,7 +47,9 @@ pub fn run(splats: SplatBuffer) -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Clone, Default)]
 pub struct TrainStats {
     pub iter: u32,
-    pub mse: f32,
+    /// Combined loss for this iter: `(1 − λ) · MSE + λ · (1 − SSIM)`.
+    /// At `ssim_lambda == 0` this collapses to pure MSE.
+    pub loss: f32,
     pub splat_count: u32,
 }
 
@@ -71,10 +73,7 @@ type SharedSnapshot = Arc<RwLock<Option<TrainSnapshot>>>;
 /// runs to completion (or until the window closes, whichever first);
 /// when the window closes the worker is detached and finishes on
 /// its own.
-pub fn run_with_training(
-    scene: Scene,
-    cfg: TrainConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_training(scene: Scene, cfg: TrainConfig) -> Result<(), Box<dyn std::error::Error>> {
     let shared: SharedSnapshot = Arc::new(RwLock::new(None));
     let shared_w = shared.clone();
     let paused = Arc::new(AtomicBool::new(false));
@@ -87,13 +86,13 @@ pub fn run_with_training(
     // inspects the current splat field.
     thread::spawn(move || {
         let mut version: u64 = 0;
-        let result = nano_optimize::train(&scene, &cfg, |iter, splats, mse| {
+        let result = nano_optimize::train(&scene, &cfg, |iter, splats, loss| {
             version = version.wrapping_add(1);
             let snapshot = TrainSnapshot {
                 splats: splats.clone(),
                 stats: TrainStats {
                     iter,
-                    mse,
+                    loss,
                     splat_count: splats.len() as u32,
                 },
                 version,
@@ -171,7 +170,12 @@ struct InputState {
     last_x: f64,
     last_y: f64,
     /// WASD + Q/E for fly mode (Q = down, E = up).
-    w: bool, a: bool, s: bool, d: bool, q: bool, e: bool,
+    w: bool,
+    a: bool,
+    s: bool,
+    d: bool,
+    q: bool,
+    e: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -274,12 +278,7 @@ impl ApplicationHandler for ViewerApp {
         window.request_redraw();
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let (Some(window), Some(state)) = (self.window.as_ref(), self.state.as_mut()) else {
             return;
         };
@@ -300,11 +299,12 @@ impl ApplicationHandler for ViewerApp {
                 ..
             } if !response.consumed => event_loop.exit(),
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state: key_state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
                 ..
             } if !response.consumed => {
                 let pressed = matches!(key_state, ElementState::Pressed);
@@ -355,8 +355,7 @@ impl ApplicationHandler for ViewerApp {
                 if has_prev && self.input.lmb {
                     // LMB drag — orbit.
                     self.orbit.azimuth += dx * 0.005;
-                    self.orbit.elevation =
-                        (self.orbit.elevation - dy * 0.005).clamp(-1.5, 1.5);
+                    self.orbit.elevation = (self.orbit.elevation - dy * 0.005).clamp(-1.5, 1.5);
                 } else if has_prev && self.input.rmb {
                     // RMB drag — pan target in the camera's screen
                     // plane. Pan magnitude scales with distance so
@@ -391,12 +390,24 @@ impl ApplicationHandler for ViewerApp {
                 let forward = (self.orbit.target - cam_pos).normalize_or_zero();
                 let right = forward.cross(Vec3::Y).normalize_or_zero();
                 let up = right.cross(forward).normalize_or_zero();
-                if self.input.w { self.orbit.target += forward * step; }
-                if self.input.s { self.orbit.target -= forward * step; }
-                if self.input.d { self.orbit.target += right   * step; }
-                if self.input.a { self.orbit.target -= right   * step; }
-                if self.input.e { self.orbit.target += up      * step; }
-                if self.input.q { self.orbit.target -= up      * step; }
+                if self.input.w {
+                    self.orbit.target += forward * step;
+                }
+                if self.input.s {
+                    self.orbit.target -= forward * step;
+                }
+                if self.input.d {
+                    self.orbit.target += right * step;
+                }
+                if self.input.a {
+                    self.orbit.target -= right * step;
+                }
+                if self.input.e {
+                    self.orbit.target += up * step;
+                }
+                if self.input.q {
+                    self.orbit.target -= up * step;
+                }
                 let window_clone = window.clone();
                 self.frame(&window_clone);
                 window_clone.request_redraw();
@@ -419,7 +430,7 @@ impl ViewerApp {
             if let Some((v, splats, stats)) = snap_ready {
                 if v > ch.last_seen_version {
                     ch.last_seen_version = v;
-                    ch.history.push(stats.mse);
+                    ch.history.push(stats.loss);
                     if let Some(state) = self.state.as_mut() {
                         state.update_splats(splats);
                     }
@@ -439,7 +450,9 @@ impl ViewerApp {
             .map(|ch| ch.paused.load(Ordering::Relaxed))
             .unwrap_or(false);
         let training_attached = self.training.is_some();
-        let Some(state) = self.state.as_mut() else { return; };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         let frame_in = FrameInputs {
             live_stats,
             training_paused: training_paused_before,
@@ -453,7 +466,8 @@ impl ViewerApp {
         if let Some(ch) = self.training.as_mut()
             && frame_out.training_paused != training_paused_before
         {
-            ch.paused.store(frame_out.training_paused, Ordering::Relaxed);
+            ch.paused
+                .store(frame_out.training_paused, Ordering::Relaxed);
         }
         // Save was requested — write the latest CPU SplatBuffer to PLY.
         // Synchronous; ~ms per million splats, fine on the UI thread.
@@ -523,32 +537,26 @@ const VIEWPORT_TEX_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm
 const DEFAULT_VIEWPORT: (u32, u32) = (960, 720);
 
 impl State {
-    fn new(
-        window: Arc<Window>,
-        splats: SplatBuffer,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(window: Arc<Window>, splats: SplatBuffer) -> Result<Self, Box<dyn std::error::Error>> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(
             wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
         );
         let surface = instance.create_surface(window.clone())?;
-        let adapter = pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            },
-        ))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("nano-view device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: adapter.limits(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 trace: wgpu::Trace::Off,
-            },
-        ))?;
+            }))?;
         let caps = surface.get_capabilities(&adapter);
         // egui-wgpu prefers an sRGB swapchain so its UI colours are
         // gamma-correct out of the box.
@@ -560,7 +568,12 @@ impl State {
             .unwrap_or(caps.formats[0]);
         configure_surface(&surface, &device, surface_format, size, caps.alpha_modes[0]);
 
-        let ctx = WgpuCtx { instance, adapter, device, queue };
+        let ctx = WgpuCtx {
+            instance,
+            adapter,
+            device,
+            queue,
+        };
         let rasterizer = Rasterizer::new(&ctx);
         let binner = TileBinner::new(&ctx);
         let gpu_splats = GpuSplatBuffer::upload(&ctx, &splats);
@@ -569,8 +582,7 @@ impl State {
         let (image_w, image_h) = DEFAULT_VIEWPORT;
         let projected = ctx.storage_buffer_zeroed(
             "view-projected",
-            (gpu_splats.n as u64)
-                * std::mem::size_of::<nano_optimize::ProjectedSplat>() as u64,
+            (gpu_splats.n as u64) * std::mem::size_of::<nano_optimize::ProjectedSplat>() as u64,
         );
         let composite_buf = rasterizer.alloc_image(&ctx, image_w, image_h);
         let (splat_tex, splat_view) = make_splat_texture(&ctx.device, image_w, image_h);
@@ -659,18 +671,19 @@ impl State {
         }
         self.image_w = new_w.max(1);
         self.image_h = new_h.max(1);
-        self.composite_buf = self.rasterizer.alloc_image(&self.ctx, self.image_w, self.image_h);
+        self.composite_buf = self
+            .rasterizer
+            .alloc_image(&self.ctx, self.image_w, self.image_h);
         let (tex, view) = make_splat_texture(&self.ctx.device, self.image_w, self.image_h);
         self.splat_tex = tex;
         self.splat_view = view;
         // egui caches texture bindings — update the registered slot.
-        self.egui_renderer
-            .update_egui_texture_from_wgpu_texture(
-                &self.ctx.device,
-                &self.splat_view,
-                wgpu::FilterMode::Linear,
-                self.splat_texture_id,
-            );
+        self.egui_renderer.update_egui_texture_from_wgpu_texture(
+            &self.ctx.device,
+            &self.splat_view,
+            wgpu::FilterMode::Linear,
+            self.splat_texture_id,
+        );
     }
 
     fn frame(
@@ -765,10 +778,10 @@ impl State {
                 .show_inside(ui, &mut viewer);
         });
         // Push any UI-side mutations back out (FoV slider).
-        orbit.fov_y = ui_state.fov_y_deg.to_radians().clamp(
-            std::f32::consts::FRAC_PI_8,
-            std::f32::consts::PI - 0.1,
-        );
+        orbit.fov_y = ui_state
+            .fov_y_deg
+            .to_radians()
+            .clamp(std::f32::consts::FRAC_PI_8, std::f32::consts::PI - 0.1);
         let req = ui_state.requested_viewport_size;
         self.resize_viewport(req[0], req[1]);
 
@@ -800,12 +813,12 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder =
-            self.ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("egui-encoder"),
-                });
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("egui-encoder"),
+            });
         for (id, delta) in &output.textures_delta.set {
             self.egui_renderer
                 .update_texture(&self.ctx.device, &self.ctx.queue, *id, delta);
@@ -846,9 +859,7 @@ impl State {
         for id in &output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
-        self.ctx
-            .queue
-            .submit(std::iter::once(encoder.finish()));
+        self.ctx.queue.submit(std::iter::once(encoder.finish()));
         surface_tex.present();
         frame_out
     }
@@ -931,10 +942,7 @@ impl TabViewer for DockedTabs<'_> {
                             );
                         }
                         Err(e) => {
-                            ui.colored_label(
-                                egui::Color32::LIGHT_RED,
-                                format!("✗ {e}"),
-                            );
+                            ui.colored_label(egui::Color32::LIGHT_RED, format!("✗ {e}"));
                         }
                     }
                 }
@@ -957,7 +965,7 @@ impl TabViewer for DockedTabs<'_> {
                     }
                     Some((stats, history)) => {
                         ui.label(format!("Iter: {}", stats.iter));
-                        ui.label(format!("MSE:  {:.6}", stats.mse));
+                        ui.label(format!("Loss: {:.6}", stats.loss));
                         ui.label(format!("Splats: {}", stats.splat_count));
                         ui.separator();
                         egui_plot::Plot::new("loss_curve")
@@ -971,7 +979,7 @@ impl TabViewer for DockedTabs<'_> {
                                     .enumerate()
                                     .map(|(i, m)| [i as f64, *m as f64])
                                     .collect();
-                                plot_ui.line(egui_plot::Line::new("MSE", pts));
+                                plot_ui.line(egui_plot::Line::new("Loss", pts));
                             });
                     }
                 }
