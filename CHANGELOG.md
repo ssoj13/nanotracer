@@ -221,6 +221,20 @@ forward + analytic backward.
   closes the window and detaches the worker (which finishes the
   remaining iterations on its own).
 
+### Added — Documentation overhaul
+
+- **`docs/` mdbook.** `mdbook serve docs --open` renders the full
+  technical reference: history (tinyraytracer → CPU pipeline → GPU
+  refactor → 3DGS training → viewer), architecture, per-pass math
+  (forward / backward / Adam), shader catalog, decision log,
+  roadmap.
+- **`README.md`** rewritten to reflect the current pipeline (10
+  crates, training, viewer, all CLI fast paths).
+- **`AGENTS.md`** condensed into a one-page codepath map; references
+  the mdbook for prose.
+- **`DIAGRAMS.md`** mermaid versions of every diagram, including the
+  per-iteration training loop and the viewer per-frame flow.
+
 ### Tracked / Parked
 
 - **A4-ext** — `0.2·L1 + 0.8·DSSIM` perceptual loss (5-pass Gaussian

@@ -1,0 +1,22 @@
+[book]
+title = "nanotracer-rs"
+authors = ["ssoj13", "Claude"]
+description = "GPU 3D-Gaussian-splat training + viewer in Rust — technical reference."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/ssoj13/nanotracer"
+edit-url-template = "https://github.com/ssoj13/nanotracer/edit/main/docs/{path}"
+mathjax-support = true
+no-section-label = true
+
+[output.html.fold]
+enable = true
+level = 1

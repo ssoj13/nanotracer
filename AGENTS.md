@@ -1,269 +1,186 @@
-# AGENTS.md — nanotracer-rs dataflow & codepath map
+# AGENTS.md — codepath & dataflow map
 
-Auto-maintained map of the codebase that a future agent can read instead
-of re-scanning every file. ASCII diagrams here; mermaid versions live in
-`DIAGRAMS.md`.
-
-Workspace layout is the 7-crate structure introduced 2026-05 (see
-`plan1.md`, `README.md` "Workspace layout"). The historical single-crate
-`src/`-shaped path map at the bottom of this file is preserved only for
-agents triaging older commits.
+Compact dataflow map for agent triage. Full explanations live in the
+mdbook at `docs/src/` — start at `architecture.md`, `training-overview.md`,
+`viewer.md`. Mermaid diagrams in `DIAGRAMS.md`.
 
 ---
 
-## 1. Top-level dataflow (live path only)
+## Workspace at a glance (current)
 
 ```
-                    ┌────────────────────────────────────────────┐
-                    │ src/main.rs                                │
-                    │  - clap CLI (Args)                         │
-                    │  - gpu-mem startup line                    │
-                    │  - builds Scene { objects, lights, env }   │
-                    │  - branches on --splats flag               │
-                    └────────────────┬───────────────────────────┘
-                                     │
-                          ┌──────────┴───────────┐
-                          │                      │
-                ┌─────────▼────────┐    ┌────────▼─────────────┐
-                │ nano-render      │    │ nano-splat           │
-                │  ::render(scene, │    │  ::generate_splats_  │
-                │   cfg) -> Vec    │    │   gpu(scene, cfg)    │
-                │   <Vec3>         │    │   -> Vec<Gaussian>   │
-                └─────────┬────────┘    └────────┬─────────────┘
-                          │                      │
-                 ┌────────▼────────┐    ┌────────▼─────────────┐
-                 │ nano-io::utils  │    │ nano-splat::ply::    │
-                 │  ::save_image   │    │  write_ply           │
-                 │  (PNG)          │    │  (binary 3DGS PLY)   │
-                 └─────────────────┘    └──────────────────────┘
+nanotracer-rs/
+├─ src/main.rs       CLI dispatch (clap)
+└─ crates/
+   ├─ gpu-mem/       std-only VRAM / RAM probe
+   ├─ nano-core/     Scene + Light enum + Material + Environment + SH
+   ├─ nano-io/       glTF loader, PNG writer
+   ├─ nano-shaders/  GLSL chunks (PREAMBLE + HELPERS + sample_light)
+   ├─ nano-gpu/      ash runtime, GpuLight 64B, scene → SSBO
+   ├─ nano-render/   raytrace renderer compute pipeline (ash)
+   ├─ nano-splat/    forward-fit splat generator + PLY r/w (ash)
+   ├─ nano-optimize/ wgpu differentiable rasteriser + Adam + densify
+   └─ nano-view/     winit + wgpu surface + egui_dock viewer
 ```
 
-Both render paths use `nano-gpu::gpu_scene::build_gpu_scene*` for the
-Scene → GPU buffer marshalling and `nano-gpu::vk_runtime::VkContext` for
-Vulkan setup. Both shaders share `nano-shaders::{PREAMBLE, HELPERS}`
-chunks concatenated through `assemble(BINDINGS, BODY)`.
-
----
-
-## 2. Scene → GPU buffer marshalling
+Concrete edges:
 
 ```
-nano-core::scene::Scene
-        │
-        │ for each Object:
-        │   ┌─ Geometry::Sphere ─► sphere_mesh (UV sphere)
-        │   └─ Geometry::Mesh   ─► append_mesh
-        │
-        │ checkerboard_enabled ─► checkerboard_plane_mesh
-        ▼
-nano-gpu::gpu_scene::build_gpu_scene_with_detail_boost
-        │
-        ├─► vertices [vec4], normals [vec4]
-        ├─► triangles [uvec4]
-        ├─► tri_materials [u32]
-        ├─► tri_cdf [f32]   (area×detail-boost weight, normalised)
-        ├─► tri_areas [f32]
-        ├─► materials [GpuMaterial]
-        └─► lights [vec4]
-              │
-              ▼
-        nano-gpu::vk_runtime  (SSBO/UBO/AS uploads)
-```
-
-`detail_boost` (`gpu_scene.rs`) re-weights triangles by
-`1 - |face_normal · vertex_normal|`, so curvy regions of a smoothed
-mesh receive extra splat density. Sampling-only heuristic — no effect
-on the image renderer.
-
----
-
-## 3. nano-render image renderer
-
-```
-                ┌──────────────┐
-                │ Vulkan TLAS  │ ◄── vk_runtime::build_acceleration_structures
-                └─────┬────────┘
-                      │
-                shader  = nano_shaders::assemble(
-                            RENDERER_BINDINGS,
-                            RENDERER_BODY)
-                      │
-                      ▼
-                compute shader (8×8 threads):
-                  per pixel:
-                    for s in 0..aa²:
-                      halton-jittered ray from pinhole
-                      stack-based path trace (MAX_STACK = 16):
-                        trace_ray (in HELPERS)
-                        shade with all/one lights
-                        push reflection / refraction with weight
-                        Russian roulette after depth > 3
-                    average → outImage[gid] (rgba32f, linear)
-                      │
-                      ▼
-                copy_image_to_buffer
-                      │
-                      ▼
-        Vec<Vec3>  ─►  nano-io::utils::save_image
-                       (tonemap + sRGB + clamp on CPU)
-```
-
----
-
-## 4. nano-splat splat generator
-
-```
-   Scene + SplatConfigGpu
-            │
-            ▼
-   build_gpu_scene_with_detail_boost
-            │
-            ▼
-   sample_count = ceil(total_area × density)
-            │
-            ▼
-   shader = nano_shaders::assemble(SPLAT_BINDINGS, SPLAT_BODY)
-            │
-            ▼
-   compute shader (64-thread workgroup):
-   id < sample_count:
-     1. pick triangle by binary search on tri_cdf  (find_triangle)
-     2. uniform barycentric sample (sqrt r1 / r2)
-     3. interpolate pos, normal, fetch material
-     4. build tangent frame around normal
-     5. for s in 0..(sh_samples + glossy_extra):
-          local_dir from hemisphere sampler
-          view_dir  = tangent·x + bitangent·y + normal·z
-          radiance  = shade_surface(pos, normal, view_dir, mat)
-            shade_surface:
-              ∑ all lights (Phong: diffuse + spec via reflect(-L,N)·V)
-              + trace_path(reflect(d,N))*albedo.z
-              + trace_path(refract(d,N))*albedo.w
-          radiance → luma clamp → tonemap? → linear→sRGB → (− 0.5)
-          accumulate into ATA / ATB for 16 SH basis funcs Y_lm, l=0..3
-     6. solve_linear three times (R/G/B) with band-aware Tikhonov
-     7. sh_dc = coeffs[0]                                              (F1)
-     8. if albedo.z>0 OR albedo.w>0: zero coeffs[1..15]                (F4)
-     9. pack pos / normal / sh_dc / sh_rest planar /
-            opacity (logit) / scale (log: tangent, tangent, normal·0.5)/ (F5)
-            rotation = quat aligning local Z to surface normal
-    10. write GaussianOut to SSBO at index id
-            │
-            ▼
-   Vec<Gaussian>  ─►  nano-splat::ply::write_ply
-                      (binary little-endian, Inria 3DGS layout)
-```
-
-Tags `(F1..F5)` index the splat-fit bias notes in `README.md` "Splat-fit
-notes" and `plan1.md` §1.
-
----
-
-## 5. Crate dependency map (live edges only)
-
-```
-                          ┌──── src/main.rs ────┐
-                          │                     │
-   ┌──────────────────────┴────┬────┬────┬──────┴────────┐
-   ▼                           ▼    ▼    ▼               ▼
- nano-core               nano-io  nano-render  nano-splat  gpu-mem
-   │ ▲                    │ │       │   ▲       │   ▲
-   │ │                    │ │       │   │       │   │
-   │ └──────────┬─────────┘ │       │   │       │   │
-   │            │           │       │   │       │   │
-   │            ▼           ▼       ▼   │       ▼   │
-   │     (deps on nano-core for types)  │   (deps on│
-   │                                    │   nano-core, nano-gpu, nano-shaders)
-   ▼
- (glam, bytemuck, exr)                  │
-                                        │
-                          ┌─────────────┴─┐
-                          ▼               ▼
-                      nano-gpu       nano-shaders
-                      (ash + shaderc) (str chunks)
-                          │
-                          ▼
-                      (ash, shaderc, bytemuck, glam, nano-core)
-```
-
-Concrete edges from `Cargo.toml`:
-
-```
-nanotracer-rs (bin) → nano-core, nano-io, nano-render, nano-splat, gpu-mem
-nano-render        → nano-core, nano-gpu, nano-shaders
-nano-splat         → nano-core, nano-gpu, nano-shaders
-nano-gpu           → nano-core
-nano-io            → nano-core
-nano-shaders       → (none — pure string constants)
-nano-core          → (none — pure CPU data + glam)
-gpu-mem            → (none — std only)
+bin                 → nano-{core,io,render,splat,optimize,view}, gpu-mem
+nano-render         → nano-{core,gpu,shaders}
+nano-splat          → nano-{core,gpu,shaders}
+nano-optimize       → nano-{core,io,render,splat}
+nano-view           → nano-{core,optimize,splat}
+nano-gpu, nano-io   → nano-core
+nano-shaders, gpu-mem → (none)
 ```
 
 `splat-ref/` lives under `crates/` but is intentionally excluded from
-the workspace (its imports reference the pre-refactor `crate::renderer`
-namespace that no longer exists). It is a browsable source tree, not a
-crate.
+the workspace (pre-refactor namespace, browsable docs only).
 
 ---
 
-## 6. Dead-code map (post-cleanup)
+## Top-level CLI dispatch
 
-The pre-2026-05 dead CPU pipeline (Intersection, Scene::intersect,
-SceneBvh*, Mesh::intersect / build_bvh / normal_at / bounding_box /
-surface_area, Sphere / Sphere::to_object, Hit, intersect_sphere,
-DEFAULT_SKY_COLOR, and the `rtbvh` dependency) was removed in the
-workspace-reorg wave. Only the splat-ref directory retains the historical
-CPU helper sources, and only as a documentation artefact.
-
-`MEMORY.md`-style debt as of 2026-05-15:
-
-| Area | Note |
-|---|---|
-| `splat-ref/sampler.rs` | references `crate::renderer::*` that does not exist; intentionally excluded from workspace |
-| `nano-splat::SplatConfigGpu::tonemap` | live and consumed |
-| `nano-render::RenderConfig::light_sampling` | live; splat path always ignores |
+```
+main.rs::main
+  ├── if --view-ply <PATH>:
+  │     nano_splat::read_ply → SplatBuffer → nano_view::run
+  │
+  ├── if --view-training:
+  │     scene + train_cfg → nano_view::run_with_training
+  │                          (spawns worker → nano_optimize::train)
+  │
+  ├── if --splats <PATH> && --train:
+  │     nano_optimize::train(scene, cfg, noop callback)
+  │       └→ Gaussians → write_ply
+  │       └→ if --view: nano_view::run
+  │
+  ├── if --splats <PATH>:
+  │     nano_splat::generate_splats_gpu
+  │       └→ write_ply
+  │       └→ if --view: nano_view::run
+  │
+  └── else:
+        nano_render::render → save_image (PNG)
+```
 
 ---
 
-## 7. Shared GLSL split (nano-shaders)
+## Per-iteration training loop (nano-optimize::train)
 
 ```
-                        PREAMBLE (no globals)        HELPERS (needs bindings)
-                        ───────────────────          ──────────────────────
-  Material struct                  ✓                          —
-  EPS / MAX_STACK / PI             ✓                          —
-  wang_hash / rand01               ✓                          —
-  max_component                    ✓                          —
-  reflect_dir / refract_dir        ✓                          —
-  offset_origin / checker_color    ✓                          —
-  tonemap_reinhard / linear_to_srgb ✓                          —
-  sample_environment               —                          ✓  (uses params, env_map)
-  trace_ray / shadow_ray           —                          ✓  (uses topLevelAS)
+ReferenceView (baked once) ──┐
+SplatBuffer + 6 AdamState  ──┤
+                              │
+   per iter ┌─────────────────▼────────────────────────────┐
+            │ project_gaussians.wgsl                       │
+            │   ↓                                          │
+            │ tile_count → PrefixScan → tile_emit →        │
+            │ RadixSort (32 × 1-bit-stable) → tile_ranges  │
+            │   ↓                                          │
+            │ rasterize.wgsl (per-tile α-blend)            │
+            │   ↓                                          │
+            │ readback predicted → CPU MSE + dL/dC         │
+            │   ↓                                          │
+            │ rasterize_backward.wgsl (atomic_add_f32)     │
+            │   ↓                                          │
+            │ project_backward.wgsl                        │
+            │   ↓                                          │
+            │ readback all 6 grad buffers                  │
+            │   ↓                                          │
+            │ CPU AdamState::step × 6                      │
+            │   ↓                                          │
+            │ apply constraints (quat-norm, log-σ + opa    │
+            │   logit clamps)                              │
+            │   ↓                                          │
+            │ accumulate |d_position| L1 into grad_acc     │
+            │   ↓                                          │
+            │ if iter % 100: prune_low_opacity             │
+            │ if iter % 200: densify (clone + split)       │
+            │   ↓                                          │
+            │ gpu_splats.sync_from (or full realloc on n   │
+            │ change)                                      │
+            │   ↓                                          │
+            │ on_iter(iter, &splats, mse)  ← live viewer   │
+            └──────────────────────────────────────────────┘
 ```
 
-Per-shader assembly:
-
-```
-GLSL source = PREAMBLE
-              || <per-shader BINDINGS: local_size + bindings + Params + env_map>
-              || HELPERS
-              || <per-shader BODY: shader-specific helpers + main()>
-```
-
-The Rust helper `nano_shaders::assemble(bindings, body)` performs this
-concatenation and the renderer / splat crates pass the result straight
-to shaderc.
+Full math: see `docs/src/training-{overview,forward,backward,adam}.md`.
 
 ---
 
-## 8. Decision log
+## Viewer per-frame loop (nano-view::frame)
 
-- 2026-05-15 — Splat regression triaged: 5 shader fixes (F1–F5) landed
-  in `nano-splat::generator`. Splat-ref CPU reference kept as docs.
-- 2026-05-15 — Workspace reorganised into 7 crates. `rtbvh` dropped.
-  Materials made energy-conserving. GLSL deduplicated via `nano-shaders`.
-  Single `LightSampling` enum lifted to `nano-core`. `gpu-mem` vendored
-  for VRAM/RAM probing. SH unit tests ported into `nano-core::sh`.
-  wgpu evaluated (see `WGPU_RESEARCH.md`) — stay on `ash`.
-- 2026-05-15 — `cargo clippy --workspace --all-targets`: 0 warnings,
-  0 errors. `cargo test --workspace --lib`: 5 + 6 = 11 tests passing.
+```
+winit event ──┬──► egui_winit::on_window_event (UI input)
+              ├──► orbit camera state (LMB / RMB / WASD)
+              │
+              └── RedrawRequested ──►
+                    │ Optional: poll training snapshot RwLock,
+                    │ on version change → State::update_splats
+                    │   (sync_from or realloc if n changed)
+                    ▼
+                  Rasterizer::project
+                    ▼
+                  TileBinner::bin
+                    ▼
+                  Rasterizer::composite       (vec4f buffer)
+                    ▼
+                  Rasterizer::tonemap         (rgba8unorm texture)
+                    ▼
+                  egui_ctx::run (DockArea → Viewport / Inspector / Training)
+                    ▼
+                  egui_renderer::render to surface
+                    ▼
+                  surface.present
+```
+
+Full architecture: see `docs/src/viewer.md`.
+
+---
+
+## Scene → GPU marshalling (nano-gpu::gpu_scene)
+
+```
+nano_core::Scene { objects, lights, environment }
+   │
+   │ for each Object: Mesh → append_mesh
+   │ for the procedural checkerboard (if enabled)
+   ▼
+build_gpu_scene_with_detail_boost
+   │
+   ├─► vertices [vec4], normals [vec4], triangles [uvec4]
+   ├─► tri_materials [u32], tri_cdf [f32], tri_areas [f32]
+   ├─► materials [GpuMaterial]
+   ├─► lights [GpuLight 64B], light_radiance [vec4]   ← Light enum dispatch
+   └─► light_count u32 (logical, before zero-pad fallback)
+        │
+        ▼
+   nano_gpu::vk_runtime  ── SSBO/UBO/AS uploads
+```
+
+Implicit `Light::Env { intensity: 1.0 }` added when `scene.environment.is_some()
+&& !scene.has_env_light()`.
+
+---
+
+## Shader inventory
+
+GLSL chunks live in `nano-shaders::{PREAMBLE, HELPERS}`. Per-shader
+bindings + bodies are inlined in `nano-render` and `nano-splat`. WGSL
+files live in `crates/nano-optimize/src/shaders/`.
+
+Full catalog: see `docs/src/shaders.md`.
+
+---
+
+## Recent decision points (one-liners)
+
+| Where to look | Decision |
+|---------------|----------|
+| `docs/src/decisions.md` | Why ash vs wgpu split, why 1-bit stable radix, why CAS atomic add f32, why `Light::Env` instead of `--ibl-strength`. |
+| `docs/src/training-backward.md` | Why `T > 1.0001` early-bail (numerical-stability fix). |
+| `docs/src/lights.md` | Per-variant sampling math. |
+| `docs/src/training-adam.md` | Adam stride per attribute + densify policy. |
+| `CHANGELOG.md` | Chronological narrative of every milestone. |
