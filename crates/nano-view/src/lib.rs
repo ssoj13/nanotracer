@@ -260,7 +260,7 @@ impl ApplicationHandler for ViewerApp {
         // Let egui consume input first; if egui claims it, skip the
         // viewer's own handlers (e.g. typing in a numeric box).
         let response = state.egui_state.on_window_event(window, &event);
-        let captured_pointer = state.egui_ctx.is_pointer_over_area();
+        let captured_pointer = state.egui_ctx.is_pointer_over_egui();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -315,33 +315,36 @@ impl ApplicationHandler for ViewerApp {
                     self.input.last_y = 0.0;
                 }
             }
-            WindowEvent::CursorMoved { position, .. } if !captured_pointer => {
-                if self.input.lmb || self.input.rmb {
-                    if self.input.last_x != 0.0 || self.input.last_y != 0.0 {
-                        let dx = (position.x - self.input.last_x) as f32;
-                        let dy = (position.y - self.input.last_y) as f32;
-                        if self.input.lmb {
-                            // LMB drag — orbit.
-                            self.orbit.azimuth += dx * 0.005;
-                            self.orbit.elevation =
-                                (self.orbit.elevation - dy * 0.005).clamp(-1.5, 1.5);
-                        } else if self.input.rmb {
-                            // RMB drag — pan target in the camera's
-                            // screen plane. Pan magnitude scales with
-                            // distance so the feel is consistent at
-                            // any zoom level.
-                            let cam_pos = self.orbit.position();
-                            let forward = (self.orbit.target - cam_pos).normalize_or_zero();
-                            let world_up = Vec3::Y;
-                            let right = forward.cross(world_up).normalize_or_zero();
-                            let up = right.cross(forward).normalize_or_zero();
-                            let scale = self.orbit.distance * 0.002;
-                            self.orbit.target -= right * (dx * scale) - up * (dy * scale);
-                        }
-                    }
-                    self.input.last_x = position.x;
-                    self.input.last_y = position.y;
+            WindowEvent::CursorMoved { position, .. }
+                if !captured_pointer && (self.input.lmb || self.input.rmb) =>
+            {
+                // Skip the delta-apply only on the very first cursor
+                // event after a press (when last_{x,y} are still the
+                // sentinel 0.0) so we don't lurch toward the window
+                // origin. Last_x/last_y are still updated below so
+                // subsequent moves work.
+                let has_prev = self.input.last_x != 0.0 || self.input.last_y != 0.0;
+                let dx = (position.x - self.input.last_x) as f32;
+                let dy = (position.y - self.input.last_y) as f32;
+                if has_prev && self.input.lmb {
+                    // LMB drag — orbit.
+                    self.orbit.azimuth += dx * 0.005;
+                    self.orbit.elevation =
+                        (self.orbit.elevation - dy * 0.005).clamp(-1.5, 1.5);
+                } else if has_prev && self.input.rmb {
+                    // RMB drag — pan target in the camera's screen
+                    // plane. Pan magnitude scales with distance so
+                    // the feel is consistent at any zoom level.
+                    let cam_pos = self.orbit.position();
+                    let forward = (self.orbit.target - cam_pos).normalize_or_zero();
+                    let world_up = Vec3::Y;
+                    let right = forward.cross(world_up).normalize_or_zero();
+                    let up = right.cross(forward).normalize_or_zero();
+                    let scale = self.orbit.distance * 0.002;
+                    self.orbit.target -= right * (dx * scale) - up * (dy * scale);
                 }
+                self.input.last_x = position.x;
+                self.input.last_y = position.y;
             }
             WindowEvent::MouseWheel { delta, .. } if !captured_pointer => {
                 let s = match delta {
@@ -655,16 +658,20 @@ impl State {
             target: orbit.target,
             requested_viewport_size: [self.image_w, self.image_h],
         };
-        let output = self.egui_ctx.clone().run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                let mut viewer = DockedTabs {
-                    state: &mut ui_state,
-                    train: live_stats.as_ref(),
-                };
-                DockArea::new(dock)
-                    .style(Style::from_egui(ctx.style().as_ref()))
-                    .show_inside(ui, &mut viewer);
-            });
+        // egui 0.34 prefers `run_ui` (yields a `&mut Ui` directly) over
+        // `run` + a CentralPanel wrapper. We grab the dock style once
+        // outside the closure since `global_style()` returns an Arc
+        // snapshot — cheap to clone, no need for the per-tick Context
+        // borrow.
+        let dock_style = Style::from_egui(self.egui_ctx.global_style().as_ref());
+        let output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
+            let mut viewer = DockedTabs {
+                state: &mut ui_state,
+                train: live_stats.as_ref(),
+            };
+            DockArea::new(dock)
+                .style(dock_style.clone())
+                .show_inside(ui, &mut viewer);
         });
         // Push any UI-side mutations back out (FoV slider).
         orbit.fov_y = ui_state.fov_y_deg.to_radians().clamp(

@@ -404,19 +404,19 @@ fn densify(
     let mut to_clone: Vec<usize> = Vec::new();
     let mut to_split: Vec<usize> = Vec::new();
     let mut projected_count = n_before;
-    for i in 0..n_before {
-        let avg = grad_acc_mut[i] / count_f;
+    for (i, &acc) in grad_acc_mut.iter().enumerate().take(n_before) {
+        let avg = acc / count_f;
         if avg <= grad_threshold {
             continue;
         }
         let max_log_scale = splats.scales[i].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         if max_log_scale > split_log_scale_threshold {
             // Split adds 2 children and removes the parent (net +1).
-            if projected_count + 1 <= max_splats {
+            if projected_count < max_splats {
                 to_split.push(i);
                 projected_count += 1;
             }
-        } else if projected_count + 1 <= max_splats {
+        } else if projected_count < max_splats {
             // Clone adds 1 child.
             to_clone.push(i);
             projected_count += 1;
@@ -565,6 +565,56 @@ fn prune_low_opacity(
     to_remove.len()
 }
 
+fn flatten_vec3(v: &[Vec3]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(v.len() * 3);
+    for p in v {
+        out.push(p.x);
+        out.push(p.y);
+        out.push(p.z);
+    }
+    out
+}
+
+fn flatten_vec4_strip_w(v: &[[f32; 4]]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(v.len() * 3);
+    for p in v {
+        out.push(p[0]);
+        out.push(p[1]);
+        out.push(p[2]);
+    }
+    out
+}
+
+/// `sh_rest` on the GPU is padded from 45 to 48 floats per splat (3
+/// trailing zeros). Strip the padding so AdamState (sized for 45·n)
+/// gets the matching slab.
+fn strip_sh_rest_padding(padded: &[f32], n: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(n * 45);
+    for i in 0..n {
+        let base = i * 48;
+        out.extend_from_slice(&padded[base..base + 45]);
+    }
+    out
+}
+
+/// L2 norm over a flat vec4-padded gradient buffer (w channel is padding).
+fn grad_norm_vec4(g: &[[f32; 4]]) -> f32 {
+    let mut s = 0.0_f64;
+    for v in g {
+        s += (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) as f64;
+    }
+    s.sqrt() as f32
+}
+
+/// L2 norm over a flat scalar gradient buffer.
+fn grad_norm_scalar(g: &[f32]) -> f32 {
+    let mut s = 0.0_f64;
+    for v in g {
+        s += (*v as f64) * (*v as f64);
+    }
+    s.sqrt() as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,54 +727,4 @@ mod tests {
             assert!((*o - 2.0).abs() < 1e-6, "opacity should be 2.0, got {o}");
         }
     }
-}
-
-fn flatten_vec3(v: &[Vec3]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(v.len() * 3);
-    for p in v {
-        out.push(p.x);
-        out.push(p.y);
-        out.push(p.z);
-    }
-    out
-}
-
-fn flatten_vec4_strip_w(v: &[[f32; 4]]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(v.len() * 3);
-    for p in v {
-        out.push(p[0]);
-        out.push(p[1]);
-        out.push(p[2]);
-    }
-    out
-}
-
-/// `sh_rest` on the GPU is padded from 45 to 48 floats per splat (3
-/// trailing zeros). Strip the padding so AdamState (sized for 45·n)
-/// gets the matching slab.
-fn strip_sh_rest_padding(padded: &[f32], n: usize) -> Vec<f32> {
-    let mut out = Vec::with_capacity(n * 45);
-    for i in 0..n {
-        let base = i * 48;
-        out.extend_from_slice(&padded[base..base + 45]);
-    }
-    out
-}
-
-/// L2 norm over a flat vec4-padded gradient buffer (w channel is padding).
-fn grad_norm_vec4(g: &[[f32; 4]]) -> f32 {
-    let mut s = 0.0_f64;
-    for v in g {
-        s += (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) as f64;
-    }
-    s.sqrt() as f32
-}
-
-/// L2 norm over a flat scalar gradient buffer.
-fn grad_norm_scalar(g: &[f32]) -> f32 {
-    let mut s = 0.0_f64;
-    for v in g {
-        s += (*v as f64) * (*v as f64);
-    }
-    s.sqrt() as f32
 }
