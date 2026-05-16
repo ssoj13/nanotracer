@@ -1,0 +1,15 @@
+[package]
+name        = "nano-view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interactive PLY splat viewer (winit + wgpu surface, reuses the nano-optimize rasteriser)."
+
+[dependencies]
+nano-optimize = { workspace = true }
+nano-splat    = { workspace = true }
+glam          = { workspace = true }
+bytemuck      = { workspace = true }
+wgpu          = { workspace = true }
+winit         = "0.30"
+pollster      = { workspace = true }

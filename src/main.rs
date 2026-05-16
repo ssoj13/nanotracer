@@ -201,6 +201,12 @@ struct Args {
     /// Disable default spheres (mesh-only mode)
     #[arg(long = "no-spheres")]
     no_spheres: bool,
+
+    /// Open the interactive splat viewer after generating / loading
+    /// the splats (via `--splats` or `--train`). Reuses the WGSL
+    /// rasteriser; orbit-cam (LMB drag + scroll zoom), ESC to quit.
+    #[arg(long = "view", default_value_t = false)]
+    view: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -395,6 +401,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Writing {} gaussians to {}...", gaussians.len(), splat_path);
         write_ply(path, &gaussians)?;
         println!("Splat generation complete");
+
+        if args.view {
+            println!("Opening interactive viewer (ESC to quit)...");
+            let buf = nano_optimize::SplatBuffer::from_gaussians(&gaussians);
+            nano_view::run(buf)?;
+        }
     } else {
         println!("GPU renderer: Vulkan ray query");
         println!("Resolution: {}x{}", WIDTH, HEIGHT);

@@ -117,13 +117,19 @@ loss + densify still ahead.
 "Сразу нормальный" — no half-jobs, proper navigation, depth-sort, env
 background, gamma-correct output. Blocked on A2 (shared kernel).
 
-- [ ] **B1 Standalone PLY viewer.** New crate `nano-view`. winit +
-      wgpu surface, loads a `.ply`, presents in a window. Camera:
-      orbit (LMB rotate, RMB pan, scroll zoom) + WASD fly mode + FoV
-      slider. Per-frame radix depth-sort by camera direction. HUD:
-      FPS, frame-time, splat count, current camera pose. Env-map
-      background reuses `nano-core::environment`. CLI: `--view scene.ply`.
-      Reuses A2's `rasterize.wgsl` verbatim — no duplicate kernels.
+- [x] **B1 Standalone viewer (v1).** New crate `nano-view`. winit +
+      wgpu surface, takes a `SplatBuffer` in memory (e.g. fresh from
+      forward-fit), opens a window, renders interactively. Camera:
+      orbit (LMB drag rotate, scroll zoom). Reuses Rasterizer's
+      `project / composite` and TileBinner's `bin` verbatim — no
+      duplicate kernels. Surface presentation via CPU-readback +
+      tonemap + sRGB encode + `write_texture` (simple, slow-ish; a
+      GPU-only tonemap+blit shader pair is a follow-up). CLI:
+      `--view` after `--splats out.ply` (or with `--train`). ESC quits.
+- [ ] **B1.x PLY loader + WASD / pan + HUD.** Read existing 3DGS
+      `.ply` files (nano-splat already has the `Gaussian` Pod,
+      needs the parser). Add RMB-pan, WASD fly-mode, FoV slider, FPS
+      / frame-time / splat-count overlay.
 - [ ] **B2 Training-time live preview.** Reuse B1's window + pipeline.
       Flag `--view-training`: during `train()` the window shows the
       current predicted frame from a fixed reference camera, refreshed

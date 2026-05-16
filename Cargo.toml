@@ -9,6 +9,7 @@ members = [
     "crates/nano-render",
     "crates/nano-splat",
     "crates/nano-optimize",
+    "crates/nano-view",
 ]
 # splat-ref is the CPU reference implementation, kept as a source-only doc tree.
 # It references the old monolithic `crate::renderer::*` paths from before the
@@ -48,6 +49,7 @@ nano-gpu      = { path = "crates/nano-gpu" }
 nano-render   = { path = "crates/nano-render" }
 nano-splat    = { path = "crates/nano-splat" }
 nano-optimize = { path = "crates/nano-optimize" }
+nano-view     = { path = "crates/nano-view" }
 
 # ── Binary package at workspace root ────────────────────────────────────────
 
@@ -68,6 +70,7 @@ nano-io       = { workspace = true }
 nano-render   = { workspace = true }
 nano-splat    = { workspace = true }
 nano-optimize = { workspace = true }
+nano-view     = { workspace = true }
 gpu-mem       = { workspace = true }
 glam          = { workspace = true }
 clap          = { workspace = true }
