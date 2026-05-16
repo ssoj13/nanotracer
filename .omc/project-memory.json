@@ -87,16 +87,16 @@
       "type": "file"
     },
     {
+      "path": "todo.md",
+      "accessCount": 15,
+      "lastAccessed": 1778892530144,
+      "type": "file"
+    },
+    {
       "path": "src",
       "accessCount": 11,
       "lastAccessed": 1778865352817,
       "type": "directory"
-    },
-    {
-      "path": "todo.md",
-      "accessCount": 10,
-      "lastAccessed": 1778887922694,
-      "type": "file"
     },
     {
       "path": "crates\\nano-core\\src\\material.rs",
