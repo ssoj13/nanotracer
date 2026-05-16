@@ -127,6 +127,41 @@ impl GpuSplatBuffer {
         }
     }
 
+    /// Re-upload an updated [`SplatBuffer`] into the *existing* GPU
+    /// buffers (without reallocating). Caller must guarantee
+    /// `src.len() == self.n` — densify / prune will replace the
+    /// whole `GpuSplatBuffer` rather than calling this.
+    pub fn sync_from(&self, ctx: &crate::gpu::WgpuCtx, src: &SplatBuffer) {
+        let n = self.n as usize;
+        debug_assert_eq!(src.len(), n);
+
+        let positions: Vec<[f32; 4]> =
+            src.positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
+        let scales: Vec<[f32; 4]> = src
+            .scales
+            .iter()
+            .map(|s| [s[0], s[1], s[2], 0.0])
+            .collect();
+        let sh_dc: Vec<[f32; 4]> = src
+            .sh_dc
+            .iter()
+            .map(|c| [c[0], c[1], c[2], 0.0])
+            .collect();
+        let mut sh_rest: Vec<f32> = Vec::with_capacity(n * SH_REST_PADDED);
+        for i in 0..n {
+            let base = i * 45;
+            sh_rest.extend_from_slice(&src.sh_rest[base..base + 45]);
+            sh_rest.extend_from_slice(&[0.0; 3]);
+        }
+
+        ctx.queue.write_buffer(&self.positions, 0, bytemuck::cast_slice(&positions));
+        ctx.queue.write_buffer(&self.rotations, 0, bytemuck::cast_slice(&src.rotations));
+        ctx.queue.write_buffer(&self.scales, 0, bytemuck::cast_slice(&scales));
+        ctx.queue.write_buffer(&self.opacities, 0, bytemuck::cast_slice(&src.opacities));
+        ctx.queue.write_buffer(&self.sh_dc, 0, bytemuck::cast_slice(&sh_dc));
+        ctx.queue.write_buffer(&self.sh_rest, 0, bytemuck::cast_slice(&sh_rest));
+    }
+
     /// Read back to a CPU [`SplatBuffer`]. Strips the `vec4` padding so
     /// the result is bit-identical to the source of a prior [`Self::upload`].
     pub fn readback(&self, ctx: &WgpuCtx) -> SplatBuffer {

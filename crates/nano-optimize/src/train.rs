@@ -30,6 +30,13 @@ use crate::splat_gpu::{GpuSplatBuffer, GradSplatBuffers};
 use crate::splat_store::SplatBuffer;
 use crate::tile_binner::{TileBinner, TilingParams};
 
+// Quaternion re-normalisation after each step keeps rotations on the
+// unit hyper-sphere; Adam happily drifts off otherwise. Hard cap on
+// log-σ and opacity-logit prevents runaway exponentials.
+const LOG_SCALE_MIN: f32 = -10.0;
+const LOG_SCALE_MAX: f32 =   5.0;
+const OPACITY_LOGIT_MAX: f32 = 10.0;
+
 /// Top-level training configuration.
 pub struct TrainConfig {
     pub iterations: u32,
@@ -73,6 +80,7 @@ pub fn train(
 
     eprintln!("[train] initialising wgpu rasteriser...");
     let ctx = WgpuCtx::new()?;
+    let mut splats = splats; // shadowed mutable for in-place Adam updates
     let gpu_splats = GpuSplatBuffer::upload(&ctx, &splats);
     let rasterizer = Rasterizer::new(&ctx);
     let binner = TileBinner::new(&ctx);
@@ -174,21 +182,58 @@ pub fn train(
             );
         }
 
-        adam_pos.t += 1;
-        adam_rot.t += 1;
-        adam_scale.t += 1;
-        adam_op.t += 1;
-        adam_dc.t += 1;
-        adam_rest.t += 1;
+        // Adam update — readback gradients, flatten, step, write back.
+        let n = gpu_splats.n as usize;
+        let g_pos: Vec<[f32; 4]> = ctx.readback(&grads.d_positions, n);
+        let g_rot: Vec<[f32; 4]> = ctx.readback(&grads.d_rotations, n);
+        let g_scale: Vec<[f32; 4]> = ctx.readback(&grads.d_scales, n);
+        let g_op: Vec<f32> = ctx.readback(&grads.d_opacities, n);
+        let g_dc: Vec<[f32; 4]> = ctx.readback(&grads.d_sh_dc, n);
+        let g_sh_rest: Vec<f32> = ctx.readback(&grads.d_sh_rest, n * 48);
+
+        let mut pos_flat = flatten_vec3(&splats.positions);
+        let mut rot_flat: Vec<f32> = splats.rotations.iter().flat_map(|q| q.iter().copied()).collect();
+        let mut scale_flat: Vec<f32> = splats.scales.iter().flat_map(|s| s.iter().copied()).collect();
+        let mut op_flat: Vec<f32> = splats.opacities.clone();
+        let mut dc_flat: Vec<f32> = splats.sh_dc.iter().flat_map(|c| c.iter().copied()).collect();
+        let mut rest_flat: Vec<f32> = splats.sh_rest.clone();
+
+        let g_pos_flat = flatten_vec4_strip_w(&g_pos);
+        let g_rot_flat: Vec<f32> = g_rot.iter().flat_map(|q| q.iter().copied()).collect();
+        let g_scale_flat = flatten_vec4_strip_w(&g_scale);
+        let g_op_flat = g_op.clone();
+        let g_dc_flat = flatten_vec4_strip_w(&g_dc);
+        let g_rest_flat = strip_sh_rest_padding(&g_sh_rest, n);
+
+        adam_pos.step(&mut pos_flat, &g_pos_flat);
+        adam_rot.step(&mut rot_flat, &g_rot_flat);
+        adam_scale.step(&mut scale_flat, &g_scale_flat);
+        adam_op.step(&mut op_flat, &g_op_flat);
+        adam_dc.step(&mut dc_flat, &g_dc_flat);
+        adam_rest.step(&mut rest_flat, &g_rest_flat);
+
+        // Write updated params back to SplatBuffer, applying physical
+        // constraints (quat re-norm, log-σ clamp, opacity-logit clamp).
+        for i in 0..n {
+            splats.positions[i] = Vec3::new(pos_flat[i * 3], pos_flat[i * 3 + 1], pos_flat[i * 3 + 2]);
+            let mut q = [rot_flat[i * 4], rot_flat[i * 4 + 1], rot_flat[i * 4 + 2], rot_flat[i * 4 + 3]];
+            let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt().max(1e-8);
+            for c in &mut q { *c /= norm; }
+            splats.rotations[i] = q;
+            splats.scales[i] = [
+                scale_flat[i * 3].clamp(LOG_SCALE_MIN, LOG_SCALE_MAX),
+                scale_flat[i * 3 + 1].clamp(LOG_SCALE_MIN, LOG_SCALE_MAX),
+                scale_flat[i * 3 + 2].clamp(LOG_SCALE_MIN, LOG_SCALE_MAX),
+            ];
+            splats.opacities[i] = op_flat[i].clamp(-OPACITY_LOGIT_MAX, OPACITY_LOGIT_MAX);
+            splats.sh_dc[i] = [dc_flat[i * 3], dc_flat[i * 3 + 1], dc_flat[i * 3 + 2]];
+        }
+        splats.sh_rest = rest_flat;
+        gpu_splats.sync_from(&ctx, &splats);
 
         if iter % 100 == 0 || iter + 1 == cfg.iterations {
             // Gradient-norm diagnostics — pos / opacity / sh_dc / scale.
-            // Cheap to read (small buffers); only on log iterations.
-            let n = gpu_splats.n as usize;
-            let g_pos: Vec<[f32; 4]> = ctx.readback(&grads.d_positions, n);
-            let g_op: Vec<f32> = ctx.readback(&grads.d_opacities, n);
-            let g_dc: Vec<[f32; 4]> = ctx.readback(&grads.d_sh_dc, n);
-            let g_scale: Vec<[f32; 4]> = ctx.readback(&grads.d_scales, n);
+            // Reuse the readbacks done above for Adam.
             let norm_pos = grad_norm_vec4(&g_pos);
             let norm_op = grad_norm_scalar(&g_op);
             let norm_dc = grad_norm_vec4(&g_dc);
@@ -203,7 +248,7 @@ pub fn train(
     }
 
     eprintln!(
-        "[train] complete. final splat count: {} (forward-only, no gradients applied yet)",
+        "[train] complete. final splat count: {} (Adam updates applied)",
         splats.len()
     );
     Ok(splats)
@@ -219,6 +264,38 @@ fn mean_squared_error(a: &[Vec3], b: &[Vec3]) -> f32 {
         sum += (d.x * d.x + d.y * d.y + d.z * d.z) as f64;
     }
     (sum / (a.len() as f64 * 3.0)) as f32
+}
+
+fn flatten_vec3(v: &[Vec3]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(v.len() * 3);
+    for p in v {
+        out.push(p.x);
+        out.push(p.y);
+        out.push(p.z);
+    }
+    out
+}
+
+fn flatten_vec4_strip_w(v: &[[f32; 4]]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(v.len() * 3);
+    for p in v {
+        out.push(p[0]);
+        out.push(p[1]);
+        out.push(p[2]);
+    }
+    out
+}
+
+/// `sh_rest` on the GPU is padded from 45 to 48 floats per splat (3
+/// trailing zeros). Strip the padding so AdamState (sized for 45·n)
+/// gets the matching slab.
+fn strip_sh_rest_padding(padded: &[f32], n: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(n * 45);
+    for i in 0..n {
+        let base = i * 48;
+        out.extend_from_slice(&padded[base..base + 45]);
+    }
+    out
 }
 
 /// L2 norm over a flat vec4-padded gradient buffer (w channel is padding).
