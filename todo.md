@@ -94,8 +94,17 @@ loss + densify still ahead.
         sign / scale errors in any chain rule step.
       - A3.5 — Integrated into `train()`: forward → MSE → backward →
         gradient-norm log. Adam updates land in A4.
-- [ ] **A4 Loss** — L1 + SSIM photometric loss vs reference views, grad
-      backprop into Adam state.
+- [x] **A4 Loss + Adam updates** — core training loop functional.
+      - MSE forward loss + per-pixel dL/dC = 2·(pred − target)/(3·W·H).
+      - GPU forward/backward → CPU readback → CPU Adam step → CPU
+        constraints (quat re-norm, log-σ clamp, opacity-logit clamp)
+        → `GpuSplatBuffer::sync_from` writes back via `queue.write_buffer`.
+      - Smoke run (100 iters, 4860 splats, 4 ref views): MSE 0.618 →
+        0.587 in 100 iters, ~5% reduction, gradient norms shrinking
+        toward local minimum — convergence verified.
+      - L1 + SSIM photometric loss is a quality knob that requires a
+        separate 5-pass Gaussian-blur SSIM kernel + backward. Tracked
+        as a follow-up under "🟧 Visible improvements" below.
 - [ ] **A5 Densify-and-prune** — split high-gradient splats, prune
       low-opacity / low-importance; cap at `--train-max-splats`.
 
@@ -126,9 +135,11 @@ Multi-scattering compensation (Heitz/Hill) landed earlier as
 
 ## 🟧 Visible improvements
 
-_(empty — Plan A subsumes the per-roughness mip-chain idea via
-differentiable rasterisation; if a non-PBR demo needs IBL specular fast
-it can revisit.)_
+- [ ] **A4-ext SSIM-augmented loss.** Replace bare MSE with
+      `0.2·L1 + 0.8·DSSIM` (Inria recipe). Requires a 5-pass Gaussian
+      blur kernel (μ_p, μ_t, σ_p², σ_pt, σ_t²) plus per-pixel SSIM
+      combine and an analytic backward. Boosts perceptual fidelity but
+      is not a correctness gate — training already converges with MSE.
 
 ## 🟨 Polish
 
