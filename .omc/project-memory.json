@@ -18,8 +18,8 @@
     "runtime": null
   },
   "build": {
-    "buildCommand": "cd C:/projects/projects.rust.cg/nanotracer-rs && cargo build --workspace --message-format=short 2>&1 | tail -10 && echo \"---CLIPPY---\" && cargo clippy --workspace --all-targets --message-format=short 2>&1 | grep -E \"warning|error\" | head -10 && echo \"---TESTS---\" && cargo test --workspace 2>&1 | grep -E \"^test result|FAILED\" | head -30",
-    "testCommand": "cd C:/projects/projects.rust.cg/nanotracer-rs && cargo build --workspace --message-format=short 2>&1 | tail -10 && echo \"---CLIPPY---\" && cargo clippy --workspace --all-targets --message-format=short 2>&1 | grep -E \"warning|error\" | head -10 && echo \"---TESTS---\" && cargo test --workspace 2>&1 | grep -E \"^test result|FAILED\" | head -30",
+    "buildCommand": "cd C:/projects/projects.rust.cg/nanotracer-rs && cargo build -p nano-view --message-format=short 2>&1 | tail -15",
+    "testCommand": "cd C:/projects/projects.rust.cg/nanotracer-rs && cargo clippy --workspace --all-targets --message-format=short 2>&1 | grep -E \"warning|error\" | head -10 && echo \"---TESTS---\" && cargo test --workspace 2>&1 | grep -E \"^test result|FAILED\" | tail -20",
     "lintCommand": "cargo clippy",
     "devCommand": "cargo run",
     "scripts": {}
