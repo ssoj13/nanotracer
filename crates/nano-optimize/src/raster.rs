@@ -17,6 +17,7 @@ use glam::{Mat4, Vec3};
 
 use crate::gpu::WgpuCtx;
 use crate::splat_gpu::GpuSplatBuffer;
+use crate::tile_binner::TilingParams;
 
 /// 48-byte per-splat record emitted by the projection kernel.
 ///
@@ -80,11 +81,23 @@ impl CameraUniform {
     }
 }
 
+/// Composite pass uniform mirroring `rasterize.wgsl::Params`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CompositeParams {
+    width: u32,
+    height: u32,
+    tile_size: u32,
+    tiles_x: u32,
+}
+
 /// Compiled wgpu pipelines for the rasteriser passes. Build once per
 /// training run and reuse for every iteration / reference view.
 pub struct Rasterizer {
     project_pipeline: wgpu::ComputePipeline,
     project_bgl: wgpu::BindGroupLayout,
+    composite_pipeline: wgpu::ComputePipeline,
+    composite_bgl: wgpu::BindGroupLayout,
 }
 
 impl Rasterizer {
@@ -159,10 +172,126 @@ impl Rasterizer {
                     cache: None,
                 });
 
+        // Composite (α-blend) pipeline ----------------------------------
+        let composite_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("rasterize"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/rasterize.wgsl").into(),
+                ),
+            });
+
+        let storage_rw = wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let storage_ro = wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let uniform = wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let composite_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("composite-bgl"),
+                entries: &[
+                    bgl_entry(0, storage_ro),
+                    bgl_entry(1, storage_ro),
+                    bgl_entry(2, storage_ro),
+                    bgl_entry(3, storage_rw),
+                    bgl_entry(4, uniform),
+                ],
+            });
+        let composite_layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("composite-pl"),
+                bind_group_layouts: &[Some(&composite_bgl)],
+                immediate_size: 0,
+            });
+        let composite_pipeline =
+            ctx.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("composite-pipeline"),
+                    layout: Some(&composite_layout),
+                    module: &composite_module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
         Self {
             project_pipeline,
             project_bgl,
+            composite_pipeline,
+            composite_bgl,
         }
+    }
+
+    /// Allocate the per-pixel `vec4` storage buffer used by the
+    /// composite pass. Zeroed; caller can reuse the same buffer across
+    /// iterations as long as the kernel rewrites every pixel.
+    pub fn alloc_image(&self, ctx: &WgpuCtx, width: u32, height: u32) -> wgpu::Buffer {
+        ctx.storage_buffer_zeroed("predicted-image", (width as u64) * (height as u64) * 16)
+    }
+
+    /// Run the composite pass — α-blend the sorted splat stream into a
+    /// `width × height` `vec4<f32>` framebuffer. Caller produces
+    /// `sorted_payloads` and `tile_ranges` via [`crate::tile_binner::TileBinner`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite(
+        &self,
+        ctx: &WgpuCtx,
+        projected: &wgpu::Buffer,
+        sorted_payloads: &wgpu::Buffer,
+        tile_ranges: &wgpu::Buffer,
+        output: &wgpu::Buffer,
+        params: &TilingParams,
+    ) {
+        let tiles_x = params.tiles_x();
+        let tiles_y = params.tiles_y();
+        let comp_params = ctx.uniform_buffer(
+            "composite-params",
+            &CompositeParams {
+                width: params.width,
+                height: params.height,
+                tile_size: params.tile_size,
+                tiles_x,
+            },
+        );
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite-bg"),
+            layout: &self.composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: projected.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: sorted_payloads.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tile_ranges.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: output.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: comp_params.as_entire_binding() },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("composite-enc"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("composite-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.composite_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(tiles_x, tiles_y, 1);
+        }
+        ctx.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Allocate a `ProjectedSplat` output buffer sized for `n` splats.
@@ -170,6 +299,8 @@ impl Rasterizer {
         let bytes = (n as u64).max(1) * std::mem::size_of::<ProjectedSplat>() as u64;
         ctx.storage_buffer_zeroed("projected", bytes)
     }
+
+    // (composite() defined above)
 
     /// Run the projection pass — writes one `ProjectedSplat` per splat
     /// in `splats` into `projected`. Caller chooses the camera; the
@@ -237,6 +368,15 @@ impl Rasterizer {
             pass.dispatch_workgroups(groups, 1, 1);
         }
         ctx.queue.submit(std::iter::once(encoder.finish()));
+    }
+}
+
+fn bgl_entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty,
+        count: None,
     }
 }
 
@@ -434,6 +574,65 @@ mod tests {
         // Conic is symmetric (isotropic input → diagonal conic, b ≈ 0).
         assert!(p.conic[1].abs() < 1e-3, "off-diagonal = {}", p.conic[1]);
         assert!((p.conic[0] - p.conic[2]).abs() < 1e-3, "non-isotropic conic");
+    }
+
+    #[test]
+    fn composite_single_splat_renders_gaussian() {
+        use crate::tile_binner::{TileBinner, TilingParams};
+
+        let ctx = match WgpuCtx::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: no GPU adapter ({e})");
+                return;
+            }
+        };
+
+        // One opaque white splat centred on a 64×64 image (4×4 tiles).
+        // Isotropic conic (1, 0, 1) → α = exp(-½·r²) where r is pixel
+        // distance from the splat centre.
+        let splat = ProjectedSplat {
+            mean_xy: [32.5, 32.5],
+            depth: 5.0,
+            radius: 30.0,
+            conic: [0.04, 0.0, 0.04], // σ = 5 → conic = 1/σ²
+            visible: 1.0,
+            color: [1.0, 1.0, 1.0],
+            opacity: 1.0,
+        };
+        let projected = ctx.storage_buffer("composite-projected", &[splat]);
+        let params = TilingParams { width: 64, height: 64, tile_size: 16, depth_max: 100.0 };
+
+        let binner = TileBinner::new(&ctx);
+        let res = binner.bin(&ctx, &projected, 1, &params);
+        let raster = Rasterizer::new(&ctx);
+        let img = raster.alloc_image(&ctx, 64, 64);
+        raster.composite(&ctx, &projected, &res.sorted_payloads, &res.tile_ranges, &img, &params);
+
+        let pixels: Vec<[f32; 4]> = ctx.readback(&img, 64 * 64);
+
+        let fetch = |x: u32, y: u32| pixels[(y * 64 + x) as usize];
+        let centre = fetch(32, 32);
+        let near = fetch(34, 34);
+        let edge = fetch(0, 0);
+        eprintln!("centre={:?} near={:?} edge={:?}", centre, near, edge);
+
+        // Centre: full coverage (α near 1) and bright.
+        assert!(centre[0] > 0.9, "centre RGB too dim: {centre:?}");
+        assert!(centre[3] > 0.9, "centre alpha too low: {centre:?}");
+        // Near (~3 px out, σ=5): still bright but slightly attenuated.
+        assert!(near[0] > 0.6, "near RGB too dim: {near:?}");
+        assert!(near[0] < centre[0] + 1e-3, "near should not exceed centre");
+        // Far corner: ~45 px out, ≫ 3σ — should be near-zero.
+        assert!(edge[0] < 0.05, "edge RGB too bright: {edge:?}");
+        assert!(edge[3] < 0.05, "edge alpha too high: {edge:?}");
+
+        // Monotonic falloff along the diagonal from the centre — α should
+        // never exceed the centre's α.
+        for d in 0..16u32 {
+            let p = fetch(32 + d, 32 + d);
+            assert!(p[3] <= centre[3] + 1e-3, "diag falloff broken at +{d}: {p:?}");
+        }
     }
 
     #[test]
