@@ -9,4 +9,4 @@ pub mod generator;
 pub mod ply;
 
 pub use generator::{SplatConfigGpu, generate_splats_gpu};
-pub use ply::{Gaussian, write_ply};
+pub use ply::{Gaussian, read_ply, write_ply};

@@ -207,10 +207,26 @@ struct Args {
     /// rasteriser; orbit-cam (LMB drag + scroll zoom), ESC to quit.
     #[arg(long = "view", default_value_t = false)]
     view: bool,
+
+    /// Load a 3DGS PLY from disk and open the interactive viewer.
+    /// Bypasses scene generation / training entirely.
+    #[arg(long = "view-ply")]
+    view_ply: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    // Fast path: open the viewer directly on a PLY file. Skips scene
+    // generation, raytracing, and forward-fit entirely.
+    if let Some(ply_path) = &args.view_ply {
+        println!("Loading PLY: {}", ply_path);
+        let gaussians = nano_splat::read_ply(std::path::Path::new(ply_path))?;
+        println!("Loaded {} gaussians. Opening viewer (ESC to quit)...", gaussians.len());
+        let buf = nano_optimize::SplatBuffer::from_gaussians(&gaussians);
+        nano_view::run(buf)?;
+        return Ok(());
+    }
 
     if let Some(info) = gpu_mem::query() {
         let mib = |b: u64| b / (1024 * 1024);
