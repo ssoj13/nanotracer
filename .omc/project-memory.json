@@ -18,8 +18,8 @@
     "runtime": null
   },
   "build": {
-    "buildCommand": "cargo build --workspace 2>&1 | tail -5",
-    "testCommand": "cargo test --workspace 2>&1 | grep -E \"^test result\" | head -15",
+    "buildCommand": "cargo build --workspace 2>&1 | tail -15",
+    "testCommand": "cargo clippy --workspace --all-targets 2>&1 | grep -E \"warning|error\" | head -5 && cargo test --workspace 2>&1 | grep -E \"^test result\" | wc -l",
     "lintCommand": "cargo clippy",
     "devCommand": "cargo run",
     "scripts": {}
