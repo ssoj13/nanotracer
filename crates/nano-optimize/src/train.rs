@@ -81,9 +81,19 @@ pub fn train(
     eprintln!("[train] initialising wgpu rasteriser...");
     let ctx = WgpuCtx::new()?;
     let mut splats = splats; // shadowed mutable for in-place Adam updates
-    let gpu_splats = GpuSplatBuffer::upload(&ctx, &splats);
+    let mut gpu_splats = GpuSplatBuffer::upload(&ctx, &splats);
     let rasterizer = Rasterizer::new(&ctx);
     let binner = TileBinner::new(&ctx);
+
+    // Prune cadence — every K iters past the warmup, sweep splats whose
+    // sigmoid-opacity has fallen below 0.005 (logit ≈ −5.3). These are
+    // splats Adam has been pushing toward transparency for many steps;
+    // keeping them is wasted budget. Empty grad_acc accumulator tracks
+    // per-splat L1(d_position) for the future densify pass (A5.2).
+    const PRUNE_EVERY: u32 = 100;
+    const PRUNE_WARMUP: u32 = 50;
+    const PRUNE_OPACITY_LOGIT: f32 = -5.3;
+    let mut grad_acc: Vec<f32> = vec![0.0; splats.len()];
 
     let width = cfg.reference.width;
     let height = cfg.reference.height;
@@ -229,6 +239,40 @@ pub fn train(
             splats.sh_dc[i] = [dc_flat[i * 3], dc_flat[i * 3 + 1], dc_flat[i * 3 + 2]];
         }
         splats.sh_rest = rest_flat;
+
+        // Accumulate per-splat |d_position| for the future densify gate.
+        for i in 0..n {
+            grad_acc[i] += g_pos_flat[i * 3].abs()
+                         + g_pos_flat[i * 3 + 1].abs()
+                         + g_pos_flat[i * 3 + 2].abs();
+        }
+
+        // Periodic prune: drop splats Adam has pushed to near-zero
+        // opacity. swap_remove is O(1) per attribute and AdamState's
+        // moments + grad_acc must follow in lockstep so per-splat
+        // state stays consistent.
+        let do_prune = iter >= PRUNE_WARMUP && iter % PRUNE_EVERY == 0;
+        if do_prune {
+            let removed = prune_low_opacity(
+                &mut splats,
+                PRUNE_OPACITY_LOGIT,
+                &mut adam_pos,
+                &mut adam_rot,
+                &mut adam_scale,
+                &mut adam_op,
+                &mut adam_dc,
+                &mut adam_rest,
+                &mut grad_acc,
+            );
+            if removed > 0 {
+                eprintln!(
+                    "[train] iter {iter}: pruned {removed} low-opacity splats ({}→{})",
+                    splats.len() + removed,
+                    splats.len()
+                );
+                gpu_splats.n = splats.len() as u32;
+            }
+        }
         gpu_splats.sync_from(&ctx, &splats);
 
         if iter % 100 == 0 || iter + 1 == cfg.iterations {
@@ -264,6 +308,91 @@ fn mean_squared_error(a: &[Vec3], b: &[Vec3]) -> f32 {
         sum += (d.x * d.x + d.y * d.y + d.z * d.z) as f64;
     }
     (sum / (a.len() as f64 * 3.0)) as f32
+}
+
+/// Drop splats whose opacity logit is below `threshold` (effectively
+/// invisible). `swap_remove` is applied in lockstep to the
+/// `SplatBuffer`, every `AdamState` slab (sized to each attribute's
+/// per-splat stride), and the per-splat `grad_acc` accumulator.
+/// Returns the count removed.
+#[allow(clippy::too_many_arguments)]
+fn prune_low_opacity(
+    splats: &mut SplatBuffer,
+    threshold: f32,
+    adam_pos: &mut AdamState,
+    adam_rot: &mut AdamState,
+    adam_scale: &mut AdamState,
+    adam_op: &mut AdamState,
+    adam_dc: &mut AdamState,
+    adam_rest: &mut AdamState,
+    grad_acc: &mut Vec<f32>,
+) -> usize {
+    let mut to_remove: Vec<usize> = (0..splats.len())
+        .filter(|&i| splats.opacities[i] < threshold)
+        .collect();
+    // Apply high-to-low so earlier indices remain valid as we shrink.
+    to_remove.sort_unstable_by(|a, b| b.cmp(a));
+    for &i in &to_remove {
+        let last = splats.len() - 1;
+        splats.swap_remove(i);
+        adam_pos.swap_remove_range(i * 3, 3);
+        adam_rot.swap_remove_range(i * 4, 4);
+        adam_scale.swap_remove_range(i * 3, 3);
+        adam_op.swap_remove_range(i, 1);
+        adam_dc.swap_remove_range(i * 3, 3);
+        adam_rest.swap_remove_range(i * 45, 45);
+        // grad_acc swap matches the SplatBuffer swap_remove semantics.
+        grad_acc.swap(i, last);
+        grad_acc.pop();
+    }
+    to_remove.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_drops_low_opacity_splats() {
+        let mut splats = SplatBuffer::default();
+        for i in 0..5 {
+            splats.push_splat(
+                Vec3::splat(i as f32),
+                [1.0, 0.0, 0.0, 0.0],
+                [-1.0, -1.0, -1.0],
+                if i % 2 == 0 { 2.0 } else { -10.0 },  // alternating: 2, -10, 2, -10, 2
+                [0.0, 0.0, 0.0],
+                &[0.0; 45],
+            );
+        }
+        let mut a_pos = AdamState::new(AdamConfig::default(), 5 * 3);
+        let mut a_rot = AdamState::new(AdamConfig::default(), 5 * 4);
+        let mut a_scale = AdamState::new(AdamConfig::default(), 5 * 3);
+        let mut a_op = AdamState::new(AdamConfig::default(), 5);
+        let mut a_dc = AdamState::new(AdamConfig::default(), 5 * 3);
+        let mut a_rest = AdamState::new(AdamConfig::default(), 5 * 45);
+        let mut grad_acc = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+
+        let removed = prune_low_opacity(
+            &mut splats,
+            -5.3,
+            &mut a_pos, &mut a_rot, &mut a_scale, &mut a_op, &mut a_dc, &mut a_rest,
+            &mut grad_acc,
+        );
+        assert_eq!(removed, 2, "should drop indices 1 and 3 (opacity = -10)");
+        assert_eq!(splats.len(), 3);
+        assert_eq!(grad_acc.len(), 3);
+        assert_eq!(a_pos.m.len(), 3 * 3);
+        assert_eq!(a_rot.m.len(), 3 * 4);
+        assert_eq!(a_scale.m.len(), 3 * 3);
+        assert_eq!(a_op.m.len(), 3);
+        assert_eq!(a_dc.m.len(), 3 * 3);
+        assert_eq!(a_rest.m.len(), 3 * 45);
+        // Survivors carry opacity = 2.0.
+        for o in &splats.opacities {
+            assert!((*o - 2.0).abs() < 1e-6, "opacity should be 2.0, got {o}");
+        }
+    }
 }
 
 fn flatten_vec3(v: &[Vec3]) -> Vec<f32> {
