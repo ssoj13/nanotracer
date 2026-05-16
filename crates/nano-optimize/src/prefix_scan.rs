@@ -37,9 +37,7 @@ impl PrefixScan {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("scan_block"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/scan_block.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scan_block.wgsl").into()),
             });
         let add_module = ctx
             .device
@@ -70,21 +68,13 @@ impl PrefixScan {
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("scan-bgl"),
-                entries: &[
-                    bgl(0, storage_rw),
-                    bgl(1, storage_rw),
-                    bgl(2, uniform),
-                ],
+                entries: &[bgl(0, storage_rw), bgl(1, storage_rw), bgl(2, uniform)],
             });
         let add_bgl = ctx
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("add-offsets-bgl"),
-                entries: &[
-                    bgl(0, storage_rw),
-                    bgl(1, storage_ro),
-                    bgl(2, uniform),
-                ],
+                entries: &[bgl(0, storage_rw), bgl(1, storage_ro), bgl(2, uniform)],
             });
 
         let scan_layout = ctx
@@ -135,7 +125,10 @@ impl PrefixScan {
     /// (the buffer's allocation may be larger but only the first `n`
     /// entries are touched).
     pub fn scan(&self, ctx: &WgpuCtx, data: &wgpu::Buffer, n: u32) {
-        assert!(n <= MAX_SCAN_LEN, "prefix-scan length {n} exceeds {MAX_SCAN_LEN}");
+        assert!(
+            n <= MAX_SCAN_LEN,
+            "prefix-scan length {n} exceeds {MAX_SCAN_LEN}"
+        );
         if n == 0 {
             return;
         }
@@ -151,8 +144,20 @@ impl PrefixScan {
         let dummy = ctx.storage_buffer_zeroed("scan-dummy", 4);
 
         let params_l0 = ctx.uniform_buffer("scan-params-l0", &ScanParams { n, _pad: [0; 3] });
-        let params_l1 = ctx.uniform_buffer("scan-params-l1", &ScanParams { n: l1, _pad: [0; 3] });
-        let params_l2 = ctx.uniform_buffer("scan-params-l2", &ScanParams { n: l2, _pad: [0; 3] });
+        let params_l1 = ctx.uniform_buffer(
+            "scan-params-l1",
+            &ScanParams {
+                n: l1,
+                _pad: [0; 3],
+            },
+        );
+        let params_l2 = ctx.uniform_buffer(
+            "scan-params-l2",
+            &ScanParams {
+                n: l2,
+                _pad: [0; 3],
+            },
+        );
 
         let mut encoder = ctx
             .device
@@ -193,9 +198,18 @@ impl PrefixScan {
             label: Some("scan-bg"),
             layout: &self.scan_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: data.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: sums.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: data.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: sums.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -220,9 +234,18 @@ impl PrefixScan {
             label: Some("add-offsets-bg"),
             layout: &self.add_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: data.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: offsets.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: data.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

@@ -95,18 +95,24 @@ pub struct TileBinner {
 
 impl TileBinner {
     pub fn new(ctx: &WgpuCtx) -> Self {
-        let count_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tile_count"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tile_count.wgsl").into()),
-        });
-        let emit_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tile_emit"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tile_emit.wgsl").into()),
-        });
-        let ranges_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tile_ranges"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tile_ranges.wgsl").into()),
-        });
+        let count_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("tile_count"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tile_count.wgsl").into()),
+            });
+        let emit_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("tile_emit"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tile_emit.wgsl").into()),
+            });
+        let ranges_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("tile_ranges"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tile_ranges.wgsl").into()),
+            });
 
         let storage_rw = wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -124,22 +130,35 @@ impl TileBinner {
             min_binding_size: None,
         };
 
-        let count_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("count-bgl"),
-            entries: &[bgl(0, storage_ro), bgl(1, storage_rw), bgl(2, storage_rw), bgl(3, uniform)],
-        });
-        let emit_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("emit-bgl"),
-            entries: &[
-                bgl(0, storage_ro), bgl(1, storage_ro),
-                bgl(2, storage_rw), bgl(3, storage_rw),
-                bgl(4, uniform),
-            ],
-        });
-        let ranges_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ranges-bgl"),
-            entries: &[bgl(0, storage_ro), bgl(1, storage_rw), bgl(2, uniform)],
-        });
+        let count_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("count-bgl"),
+                entries: &[
+                    bgl(0, storage_ro),
+                    bgl(1, storage_rw),
+                    bgl(2, storage_rw),
+                    bgl(3, uniform),
+                ],
+            });
+        let emit_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("emit-bgl"),
+                entries: &[
+                    bgl(0, storage_ro),
+                    bgl(1, storage_ro),
+                    bgl(2, storage_rw),
+                    bgl(3, storage_rw),
+                    bgl(4, uniform),
+                ],
+            });
+        let ranges_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ranges-bgl"),
+                entries: &[bgl(0, storage_ro), bgl(1, storage_rw), bgl(2, uniform)],
+            });
 
         let count_pipeline = build_pipeline(ctx, "count-pl", &count_bgl, &count_module);
         let emit_pipeline = build_pipeline(ctx, "emit-pl", &emit_bgl, &emit_module);
@@ -173,22 +192,42 @@ impl TileBinner {
         // 1. Count tiles per splat + atomic-sum into `total`.
         let counts = ctx.storage_buffer_zeroed("tile-counts", (n_splats.max(1) * 4) as u64);
         let total = ctx.storage_buffer_zeroed("tile-total", 4);
-        let count_params = ctx.uniform_buffer("count-params", &CountParams {
-            n_splats, tile_size: params.tile_size, tiles_x, tiles_y,
-        });
-
-        let mut encoder = ctx.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("tile-count-enc") },
+        let count_params = ctx.uniform_buffer(
+            "count-params",
+            &CountParams {
+                n_splats,
+                tile_size: params.tile_size,
+                tiles_x,
+                tiles_y,
+            },
         );
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tile-count-enc"),
+            });
         {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("count-bg"),
                 layout: &self.count_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: projected.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: counts.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: total.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: count_params.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: projected.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: total.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: count_params.as_entire_binding(),
+                    },
                 ],
             });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -211,8 +250,11 @@ impl TileBinner {
             let sorted_payloads = ctx.storage_buffer_zeroed("sorted-payloads", 4);
             let tile_ranges = ctx.storage_buffer_zeroed("tile-ranges", (num_tiles * 8) as u64);
             return TileBinningResult {
-                sorted_keys, sorted_payloads, tile_ranges,
-                total_pairs: 0, num_tiles,
+                sorted_keys,
+                sorted_payloads,
+                tile_ranges,
+                total_pairs: 0,
+                num_tiles,
             };
         }
 
@@ -226,24 +268,49 @@ impl TileBinner {
         let vals_b = ctx.storage_buffer_zeroed("vals-b", (total_pairs as u64) * 4);
 
         // 5. Emit (key, splat-idx) pairs.
-        let emit_params = ctx.uniform_buffer("emit-params", &EmitParams {
-            n_splats, tile_size: params.tile_size, tiles_x, tiles_y,
-            depth_max: params.depth_max,
-            _pad0: 0, _pad1: 0, _pad2: 0,
-        });
-        let mut encoder = ctx.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("tile-emit-enc") },
+        let emit_params = ctx.uniform_buffer(
+            "emit-params",
+            &EmitParams {
+                n_splats,
+                tile_size: params.tile_size,
+                tiles_x,
+                tiles_y,
+                depth_max: params.depth_max,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
+            },
         );
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tile-emit-enc"),
+            });
         {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("emit-bg"),
                 layout: &self.emit_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: projected.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: counts.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: keys_a.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: vals_a.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: emit_params.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: projected.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: keys_a.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: vals_a.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: emit_params.as_entire_binding(),
+                    },
                 ],
             });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -257,24 +324,42 @@ impl TileBinner {
         ctx.queue.submit(std::iter::once(encoder.finish()));
 
         // 6. Sort by key.
-        self.radix.sort(ctx, &keys_a, &vals_a, &keys_b, &vals_b, total_pairs);
+        self.radix
+            .sort(ctx, &keys_a, &vals_a, &keys_b, &vals_b, total_pairs);
 
         // 7. Per-tile range derivation.
         let tile_ranges = ctx.storage_buffer_zeroed("tile-ranges", (num_tiles * 8) as u64);
-        let ranges_params = ctx.uniform_buffer("ranges-params", &RangesParams {
-            total_pairs, num_tiles, _pad0: 0, _pad1: 0,
-        });
-        let mut encoder = ctx.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("tile-ranges-enc") },
+        let ranges_params = ctx.uniform_buffer(
+            "ranges-params",
+            &RangesParams {
+                total_pairs,
+                num_tiles,
+                _pad0: 0,
+                _pad1: 0,
+            },
         );
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tile-ranges-enc"),
+            });
         {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ranges-bg"),
                 layout: &self.ranges_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: keys_a.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: tile_ranges.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: ranges_params.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: keys_a.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: tile_ranges.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ranges_params.as_entire_binding(),
+                    },
                 ],
             });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -312,19 +397,22 @@ fn build_pipeline(
     bgl_: &wgpu::BindGroupLayout,
     module: &wgpu::ShaderModule,
 ) -> wgpu::ComputePipeline {
-    let layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(label),
-        bind_group_layouts: &[Some(bgl_)],
-        immediate_size: 0,
-    });
-    ctx.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(&layout),
-        module,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    })
+    let layout = ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label),
+            bind_group_layouts: &[Some(bgl_)],
+            immediate_size: 0,
+        });
+    ctx.device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
 }
 
 #[cfg(test)]
@@ -364,13 +452,18 @@ mod tests {
         // 64×64 image, 16-pixel tiles → 4×4 = 16 tiles. Splats placed at
         // tile centres, radius 4 (sub-tile) so each touches exactly one tile.
         let splats = vec![
-            vis(8.0,  8.0,  10.0, 4.0),   // tile (0, 0) → id 0
-            vis(40.0, 8.0,  20.0, 4.0),   // tile (2, 0) → id 2
-            vis(8.0,  56.0, 30.0, 4.0),   // tile (0, 3) → id 12
-            vis(56.0, 56.0,  5.0, 4.0),   // tile (3, 3) → id 15
+            vis(8.0, 8.0, 10.0, 4.0),  // tile (0, 0) → id 0
+            vis(40.0, 8.0, 20.0, 4.0), // tile (2, 0) → id 2
+            vis(8.0, 56.0, 30.0, 4.0), // tile (0, 3) → id 12
+            vis(56.0, 56.0, 5.0, 4.0), // tile (3, 3) → id 15
         ];
         let projected = upload_projected(&ctx, &splats);
-        let params = TilingParams { width: 64, height: 64, tile_size: 16, depth_max: 100.0 };
+        let params = TilingParams {
+            width: 64,
+            height: 64,
+            tile_size: 16,
+            depth_max: 100.0,
+        };
         let binner = TileBinner::new(&ctx);
         let result = binner.bin(&ctx, &projected, splats.len() as u32, &params);
 
@@ -378,7 +471,8 @@ mod tests {
         assert_eq!(result.num_tiles, 16);
 
         let sorted_keys: Vec<u32> = ctx.readback(&result.sorted_keys, result.total_pairs as usize);
-        let sorted_payloads: Vec<u32> = ctx.readback(&result.sorted_payloads, result.total_pairs as usize);
+        let sorted_payloads: Vec<u32> =
+            ctx.readback(&result.sorted_payloads, result.total_pairs as usize);
         let ranges: Vec<u32> = ctx.readback(&result.tile_ranges, (result.num_tiles * 2) as usize);
 
         // Tile-ids of sorted keys, in order.
@@ -390,7 +484,11 @@ mod tests {
             .filter_map(|tid| {
                 let begin = ranges[(tid * 2) as usize];
                 let end = ranges[(tid * 2 + 1) as usize];
-                if end > begin { Some((tid, begin, end)) } else { None }
+                if end > begin {
+                    Some((tid, begin, end))
+                } else {
+                    None
+                }
             })
             .collect();
         let want = [(0u32, 0u32, 1u32), (2, 1, 2), (12, 2, 3), (15, 3, 4)];
@@ -414,12 +512,14 @@ mod tests {
         // Both splats land in tile (1, 1) of a 64×64 / 16-tile image.
         // Tile id = 1·4 + 1 = 5. Splat 0 is far (depth 80), splat 1 close (depth 5).
         // After sort, splat 1 should come first (smaller depth → smaller key).
-        let splats = vec![
-            vis(24.0, 24.0, 80.0, 4.0),
-            vis(24.0, 24.0,  5.0, 4.0),
-        ];
+        let splats = vec![vis(24.0, 24.0, 80.0, 4.0), vis(24.0, 24.0, 5.0, 4.0)];
         let projected = upload_projected(&ctx, &splats);
-        let params = TilingParams { width: 64, height: 64, tile_size: 16, depth_max: 100.0 };
+        let params = TilingParams {
+            width: 64,
+            height: 64,
+            tile_size: 16,
+            depth_max: 100.0,
+        };
         let binner = TileBinner::new(&ctx);
         let result = binner.bin(&ctx, &projected, splats.len() as u32, &params);
 
@@ -428,7 +528,11 @@ mod tests {
         let sorted_payloads: Vec<u32> = ctx.readback(&result.sorted_payloads, 2);
         let tiles: Vec<u32> = sorted_keys.iter().map(|k| k >> 16).collect();
         assert_eq!(tiles, vec![5, 5]);
-        assert_eq!(sorted_payloads, vec![1u32, 0u32], "payload should be depth-sorted");
+        assert_eq!(
+            sorted_payloads,
+            vec![1u32, 0u32],
+            "payload should be depth-sorted"
+        );
 
         // Tile 5 range covers both entries.
         let ranges: Vec<u32> = ctx.readback(&result.tile_ranges, (result.num_tiles * 2) as usize);

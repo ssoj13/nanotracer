@@ -1,11 +1,11 @@
 {
-  "active": false,
-  "current_phase": "complete",
-  "completed_at": "2026-05-16T02:00:00Z",
-  "_meta": {
-    "mode": "autopilot",
-    "sessionId": "ec3146fb-94c0-4727-83be-82fdab532c1b",
-    "updatedAt": "2026-05-16T02:29:27.819Z",
-    "updatedBy": "state_write_tool"
-  }
+  "active": true,
+  "started_at": "2026-05-16T07:08:00.927Z",
+  "original_prompt": "/oh-my-claudecode:autopilot",
+  "session_id": "ec3146fb-94c0-4727-83be-82fdab532c1b",
+  "project_path": "C:\\projects\\projects.rust.cg\\nanotracer-rs",
+  "reinforcement_count": 0,
+  "awaiting_confirmation": true,
+  "awaiting_confirmation_set_at": "2026-05-16T07:08:00.927Z",
+  "last_checked_at": "2026-05-16T07:08:00.927Z"
 }

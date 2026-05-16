@@ -56,9 +56,7 @@ impl RadixSort {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("bit_predicate"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/bit_predicate.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bit_predicate.wgsl").into()),
             });
         let total_module = ctx
             .device
@@ -72,9 +70,7 @@ impl RadixSort {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("bit_scatter"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/bit_scatter.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bit_scatter.wgsl").into()),
             });
 
         let storage_rw = wgpu::BindingType::Buffer {
@@ -93,25 +89,40 @@ impl RadixSort {
             min_binding_size: None,
         };
 
-        let predicate_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("predicate-bgl"),
-            entries: &[bgl(0, storage_ro), bgl(1, storage_rw), bgl(2, uniform)],
-        });
-        let total_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("total-bgl"),
-            entries: &[bgl(0, storage_ro), bgl(1, storage_ro), bgl(2, storage_rw), bgl(3, uniform)],
-        });
-        let scatter_bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scatter-bgl"),
-            entries: &[
-                bgl(0, storage_ro), bgl(1, storage_ro),
-                bgl(2, storage_rw), bgl(3, storage_rw),
-                bgl(4, storage_ro), bgl(5, storage_ro),
-                bgl(6, uniform),
-            ],
-        });
+        let predicate_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("predicate-bgl"),
+                entries: &[bgl(0, storage_ro), bgl(1, storage_rw), bgl(2, uniform)],
+            });
+        let total_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("total-bgl"),
+                entries: &[
+                    bgl(0, storage_ro),
+                    bgl(1, storage_ro),
+                    bgl(2, storage_rw),
+                    bgl(3, uniform),
+                ],
+            });
+        let scatter_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("scatter-bgl"),
+                entries: &[
+                    bgl(0, storage_ro),
+                    bgl(1, storage_ro),
+                    bgl(2, storage_rw),
+                    bgl(3, storage_rw),
+                    bgl(4, storage_ro),
+                    bgl(5, storage_ro),
+                    bgl(6, uniform),
+                ],
+            });
 
-        let predicate_pipeline = build_pipeline(ctx, "predicate-pl", &predicate_bgl, &predicate_module);
+        let predicate_pipeline =
+            build_pipeline(ctx, "predicate-pl", &predicate_bgl, &predicate_module);
         let total_pipeline = build_pipeline(ctx, "total-pl", &total_bgl, &total_module);
         let scatter_pipeline = build_pipeline(ctx, "scatter-pl", &scatter_bgl, &scatter_module);
 
@@ -151,22 +162,39 @@ impl RadixSort {
             } else {
                 (keys_b, vals_b, keys_a, vals_a)
             };
-            let params = ctx.uniform_buffer("radix-params", &Params {
-                n, bit, _pad0: 0, _pad1: 0,
-            });
+            let params = ctx.uniform_buffer(
+                "radix-params",
+                &Params {
+                    n,
+                    bit,
+                    _pad0: 0,
+                    _pad1: 0,
+                },
+            );
 
             // 1. Predicate.
-            let mut encoder = ctx.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("radix-pred-enc") },
-            );
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("radix-pred-enc"),
+                });
             {
                 let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("pred-bg"),
                     layout: &self.predicate_bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: src_keys.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: predicate.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: src_keys.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: predicate.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: params.as_entire_binding(),
+                        },
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -183,18 +211,32 @@ impl RadixSort {
             self.scan.scan(ctx, &predicate, n);
 
             // 3. Compute total zeros.
-            let mut encoder = ctx.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("radix-total-enc") },
-            );
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("radix-total-enc"),
+                });
             {
                 let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("total-bg"),
                     layout: &self.total_bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: src_keys.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: predicate.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: total.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: src_keys.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: predicate.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: total.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params.as_entire_binding(),
+                        },
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -208,21 +250,44 @@ impl RadixSort {
             ctx.queue.submit(std::iter::once(encoder.finish()));
 
             // 4. Scatter.
-            let mut encoder = ctx.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("radix-scatter-enc") },
-            );
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("radix-scatter-enc"),
+                });
             {
                 let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("scatter-bg"),
                     layout: &self.scatter_bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: src_keys.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: src_vals.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: dst_keys.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: dst_vals.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: predicate.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: total.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: params.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: src_keys.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: src_vals.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: dst_keys.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: dst_vals.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: predicate.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: total.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: params.as_entire_binding(),
+                        },
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -253,19 +318,22 @@ fn build_pipeline(
     bgl: &wgpu::BindGroupLayout,
     module: &wgpu::ShaderModule,
 ) -> wgpu::ComputePipeline {
-    let layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(label),
-        bind_group_layouts: &[Some(bgl)],
-        immediate_size: 0,
-    });
-    ctx.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(&layout),
-        module,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    })
+    let layout = ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label),
+            bind_group_layouts: &[Some(bgl)],
+            immediate_size: 0,
+        });
+    ctx.device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
 }
 
 #[cfg(test)]
@@ -330,7 +398,12 @@ mod tests {
             assert_eq!(sk[i], keys[sv[i] as usize], "payload mismatch at {i}");
         }
         for i in 1..n {
-            assert!(sk[i - 1] <= sk[i], "not sorted at {i}: {} > {}", sk[i - 1], sk[i]);
+            assert!(
+                sk[i - 1] <= sk[i],
+                "not sorted at {i}: {} > {}",
+                sk[i - 1],
+                sk[i]
+            );
         }
     }
 }

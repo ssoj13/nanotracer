@@ -210,9 +210,7 @@ impl Rasterizer {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("rasterize"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/rasterize.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/rasterize.wgsl").into()),
             });
 
         let storage_rw = wgpu::BindingType::Buffer {
@@ -261,35 +259,35 @@ impl Rasterizer {
                 });
 
         // Composite-backward (α-blend reverse) pipeline ---------------
-        let composite_backward_module = ctx
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("rasterize_backward"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/rasterize_backward.wgsl").into(),
-                ),
-            });
-        let composite_backward_bgl = ctx
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("composite-bwd-bgl"),
-                entries: &[
-                    bgl_entry(0, storage_ro), // projected
-                    bgl_entry(1, storage_ro), // sorted_payloads
-                    bgl_entry(2, storage_ro), // tile_ranges
-                    bgl_entry(3, storage_ro), // forward_out
-                    bgl_entry(4, storage_ro), // dL_dC
-                    bgl_entry(5, storage_rw), // projected_grad (atomic)
-                    bgl_entry(6, uniform),    // params
-                ],
-            });
-        let composite_backward_layout = ctx
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("composite-bwd-pl"),
-                bind_group_layouts: &[Some(&composite_backward_bgl)],
-                immediate_size: 0,
-            });
+        let composite_backward_module =
+            ctx.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("rasterize_backward"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        include_str!("shaders/rasterize_backward.wgsl").into(),
+                    ),
+                });
+        let composite_backward_bgl =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("composite-bwd-bgl"),
+                    entries: &[
+                        bgl_entry(0, storage_ro), // projected
+                        bgl_entry(1, storage_ro), // sorted_payloads
+                        bgl_entry(2, storage_ro), // tile_ranges
+                        bgl_entry(3, storage_ro), // forward_out
+                        bgl_entry(4, storage_ro), // dL_dC
+                        bgl_entry(5, storage_rw), // projected_grad (atomic)
+                        bgl_entry(6, uniform),    // params
+                    ],
+                });
+        let composite_backward_layout =
+            ctx.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("composite-bwd-pl"),
+                    bind_group_layouts: &[Some(&composite_backward_bgl)],
+                    immediate_size: 0,
+                });
         let composite_backward_pipeline =
             ctx.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -302,14 +300,14 @@ impl Rasterizer {
                 });
 
         // Project-backward pipeline ------------------------------------
-        let project_backward_module = ctx
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("project_backward"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/project_backward.wgsl").into(),
-                ),
-            });
+        let project_backward_module =
+            ctx.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("project_backward"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        include_str!("shaders/project_backward.wgsl").into(),
+                    ),
+                });
         // 14 bindings: camera + 6 forward inputs + 1 grad input + 6 grad outputs.
         let pb_entries: [wgpu::BindGroupLayoutEntry; 14] = std::array::from_fn(|i| {
             let ty = match i {
@@ -319,19 +317,19 @@ impl Rasterizer {
             };
             bgl_entry(i as u32, ty)
         });
-        let project_backward_bgl = ctx
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("project-bwd-bgl"),
-                entries: &pb_entries,
-            });
-        let project_backward_layout = ctx
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("project-bwd-pl"),
-                bind_group_layouts: &[Some(&project_backward_bgl)],
-                immediate_size: 0,
-            });
+        let project_backward_bgl =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("project-bwd-bgl"),
+                    entries: &pb_entries,
+                });
+        let project_backward_layout =
+            ctx.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("project-bwd-pl"),
+                    bind_group_layouts: &[Some(&project_backward_bgl)],
+                    immediate_size: 0,
+                });
         let project_backward_pipeline =
             ctx.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -348,9 +346,7 @@ impl Rasterizer {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("tonemap"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/tonemap.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tonemap.wgsl").into()),
             });
         let tonemap_bgl = ctx
             .device
@@ -416,20 +412,36 @@ impl Rasterizer {
     ) {
         let params = ctx.uniform_buffer(
             "tonemap-params",
-            &TonemapParams { width, height, _pad0: 0, _pad1: 0 },
+            &TonemapParams {
+                width,
+                height,
+                _pad0: 0,
+                _pad1: 0,
+            },
         );
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tonemap-bg"),
             layout: &self.tonemap_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: composite.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(target) },
-                wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: composite.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(target),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
-        let mut encoder = ctx.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("tonemap-enc") },
-        );
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tonemap-enc"),
+            });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("tonemap-pass"),
@@ -477,11 +489,26 @@ impl Rasterizer {
             label: Some("composite-bg"),
             layout: &self.composite_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: projected.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: sorted_payloads.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: tile_ranges.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: output.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: comp_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: projected.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: sorted_payloads.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tile_ranges.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: comp_params.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = ctx
@@ -542,20 +569,62 @@ impl Rasterizer {
             label: Some("project-bwd-bg"),
             layout: &self.project_backward_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0,  resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1,  resource: splats.positions.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2,  resource: splats.rotations.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3,  resource: splats.scales.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4,  resource: splats.opacities.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5,  resource: splats.sh_dc.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6,  resource: splats.sh_rest.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7,  resource: projected_grad.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8,  resource: grads.d_positions.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9,  resource: grads.d_rotations.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 10, resource: grads.d_scales.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: grads.d_opacities.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 12, resource: grads.d_sh_dc.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 13, resource: grads.d_sh_rest.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: splats.positions.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: splats.rotations.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: splats.scales.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: splats.opacities.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: splats.sh_dc.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: splats.sh_rest.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: projected_grad.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: grads.d_positions.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: grads.d_rotations.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: grads.d_scales.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: grads.d_opacities.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: grads.d_sh_dc.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: grads.d_sh_rest.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = ctx
@@ -607,13 +676,34 @@ impl Rasterizer {
             label: Some("composite-bwd-bg"),
             layout: &self.composite_backward_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: projected.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: sorted_payloads.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: tile_ranges.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: forward_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: dl_dc.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: projected_grad.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: comp_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: projected.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: sorted_payloads.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tile_ranges.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: forward_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: dl_dc.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: projected_grad.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: comp_params.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = ctx
@@ -728,9 +818,21 @@ pub mod cpu_oracle {
         let y = q[2];
         let z = q[3];
         Mat3::from_cols(
-            Vec3::new(1.0 - 2.0 * (y*y + z*z),       2.0 * (x*y + w*z),       2.0 * (x*z - w*y)),
-            Vec3::new(      2.0 * (x*y - w*z), 1.0 - 2.0 * (x*x + z*z),       2.0 * (y*z + w*x)),
-            Vec3::new(      2.0 * (x*z + w*y),       2.0 * (y*z - w*x), 1.0 - 2.0 * (x*x + y*y)),
+            Vec3::new(
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y + w * z),
+                2.0 * (x * z - w * y),
+            ),
+            Vec3::new(
+                2.0 * (x * y - w * z),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z + w * x),
+            ),
+            Vec3::new(
+                2.0 * (x * z + w * y),
+                2.0 * (y * z - w * x),
+                1.0 - 2.0 * (x * x + y * y),
+            ),
         )
     }
 
@@ -743,7 +845,9 @@ pub mod cpu_oracle {
         const SH_C0: f32 = 0.2820948;
         const SH_C1: f32 = 0.488602;
         const SH_C2: [f32; 5] = [1.0925485, -1.0925485, 0.31539157, -1.0925485, 0.54627424];
-        const SH_C3: [f32; 7] = [-0.5900436, 2.8906114, -0.4570458, 0.37317634, -0.4570458, 1.4453057, -0.5900436];
+        const SH_C3: [f32; 7] = [
+            -0.5900436, 2.8906114, -0.4570458, 0.37317634, -0.4570458, 1.4453057, -0.5900436,
+        ];
 
         let mut rgb = Vec3::from(sh_dc) * SH_C0;
         let (x, y, z) = (dir.x, dir.y, dir.z);
@@ -770,17 +874,17 @@ pub mod cpu_oracle {
         // Planar layout: R[1..15], G[1..15], B[1..15] inside the 45-element slice.
         let mut acc = Vec3::ZERO;
         for i in 0..3 {
-            acc.x += sh_rest[i]      * b1[i];
+            acc.x += sh_rest[i] * b1[i];
             acc.y += sh_rest[15 + i] * b1[i];
             acc.z += sh_rest[30 + i] * b1[i];
         }
         for i in 0..5 {
-            acc.x += sh_rest[3  + i] * b2[i];
+            acc.x += sh_rest[3 + i] * b2[i];
             acc.y += sh_rest[18 + i] * b2[i];
             acc.z += sh_rest[33 + i] * b2[i];
         }
         for i in 0..7 {
-            acc.x += sh_rest[8  + i] * b3[i];
+            acc.x += sh_rest[8 + i] * b3[i];
             acc.y += sh_rest[23 + i] * b3[i];
             acc.z += sh_rest[38 + i] * b3[i];
         }
@@ -801,10 +905,7 @@ pub mod cpu_oracle {
 
         let cx = cam.width * 0.5;
         let cy = cam.height * 0.5;
-        let mean_xy = [
-            cx + cam.focal * t.x / t.z,
-            cy - cam.focal * t.y / t.z,
-        ];
+        let mean_xy = [cx + cam.focal * t.x / t.z, cy - cam.focal * t.y / t.z];
 
         let rot = quat_to_mat3(splats.rotations[idx]);
         let s = splats.scales[idx];
@@ -846,7 +947,11 @@ pub mod cpu_oracle {
 
         let cam_pos = Vec3::from(cam.cam_pos);
         let to_cam = (cam_pos - p_world).normalize_or_zero();
-        let rgb = eval_sh(splats.sh_dc[idx], &splats.sh_rest[idx * 45..(idx + 1) * 45], to_cam);
+        let rgb = eval_sh(
+            splats.sh_dc[idx],
+            &splats.sh_rest[idx * 45..(idx + 1) * 45],
+            to_cam,
+        );
         let opacity = sigmoid(splats.opacities[idx]);
 
         ProjectedSplat {
@@ -869,12 +974,12 @@ mod tests {
     fn unit_splat() -> SplatBuffer {
         let mut buf = SplatBuffer::default();
         buf.push_splat(
-            Vec3::new(0.0, 0.0, -5.0),                  // pos in front of camera at origin
-            [1.0, 0.0, 0.0, 0.0],                       // identity quat (w, x, y, z)
-            [0.0, 0.0, 0.0],                            // log σ = 0 → σ = 1
-            10.0,                                       // very opaque (sigmoid ≈ 1)
-            [0.5, 0.3, 0.1],                            // SH DC
-            &[0.0; 45],                                 // bands 1..3 = 0
+            Vec3::new(0.0, 0.0, -5.0), // pos in front of camera at origin
+            [1.0, 0.0, 0.0, 0.0],      // identity quat (w, x, y, z)
+            [0.0, 0.0, 0.0],           // log σ = 0 → σ = 1
+            10.0,                      // very opaque (sigmoid ≈ 1)
+            [0.5, 0.3, 0.1],           // SH DC
+            &[0.0; 45],                // bands 1..3 = 0
         );
         buf
     }
@@ -884,7 +989,7 @@ mod tests {
             Vec3::ZERO,
             Vec3::new(0.0, 0.0, -1.0),
             Vec3::Y,
-            std::f32::consts::FRAC_PI_2,  // 90° vertical FoV
+            std::f32::consts::FRAC_PI_2, // 90° vertical FoV
             256,
             256,
             n,
@@ -898,15 +1003,26 @@ mod tests {
         let p = cpu_oracle::project_one(&splats, 0, &cam);
         assert_eq!(p.visible, 1.0);
         // splat sits dead ahead → screen-centre.
-        assert!((p.mean_xy[0] - 128.0).abs() < 1e-3, "mean_x = {}", p.mean_xy[0]);
-        assert!((p.mean_xy[1] - 128.0).abs() < 1e-3, "mean_y = {}", p.mean_xy[1]);
+        assert!(
+            (p.mean_xy[0] - 128.0).abs() < 1e-3,
+            "mean_x = {}",
+            p.mean_xy[0]
+        );
+        assert!(
+            (p.mean_xy[1] - 128.0).abs() < 1e-3,
+            "mean_y = {}",
+            p.mean_xy[1]
+        );
         assert!((p.depth - 5.0).abs() < 1e-3, "depth = {}", p.depth);
         // Isotropic σ = 1 at depth 5, focal ≈ 128 → 2D σ ≈ 25.6 px (plus low-pass).
         // Radius ≈ 3·σ ≈ 77 px (matches Inria's rule of thumb).
         assert!(p.radius > 50.0 && p.radius < 100.0, "radius = {}", p.radius);
         // Conic is symmetric (isotropic input → diagonal conic, b ≈ 0).
         assert!(p.conic[1].abs() < 1e-3, "off-diagonal = {}", p.conic[1]);
-        assert!((p.conic[0] - p.conic[2]).abs() < 1e-3, "non-isotropic conic");
+        assert!(
+            (p.conic[0] - p.conic[2]).abs() < 1e-3,
+            "non-isotropic conic"
+        );
     }
 
     #[test]
@@ -934,13 +1050,25 @@ mod tests {
             opacity: 1.0,
         };
         let projected = ctx.storage_buffer("composite-projected", &[splat]);
-        let params = TilingParams { width: 64, height: 64, tile_size: 16, depth_max: 100.0 };
+        let params = TilingParams {
+            width: 64,
+            height: 64,
+            tile_size: 16,
+            depth_max: 100.0,
+        };
 
         let binner = TileBinner::new(&ctx);
         let res = binner.bin(&ctx, &projected, 1, &params);
         let raster = Rasterizer::new(&ctx);
         let img = raster.alloc_image(&ctx, 64, 64);
-        raster.composite(&ctx, &projected, &res.sorted_payloads, &res.tile_ranges, &img, &params);
+        raster.composite(
+            &ctx,
+            &projected,
+            &res.sorted_payloads,
+            &res.tile_ranges,
+            &img,
+            &params,
+        );
 
         let pixels: Vec<[f32; 4]> = ctx.readback(&img, 64 * 64);
 
@@ -964,7 +1092,10 @@ mod tests {
         // never exceed the centre's α.
         for d in 0..16u32 {
             let p = fetch(32 + d, 32 + d);
-            assert!(p[3] <= centre[3] + 1e-3, "diag falloff broken at +{d}: {p:?}");
+            assert!(
+                p[3] <= centre[3] + 1e-3,
+                "diag falloff broken at +{d}: {p:?}"
+            );
         }
     }
 
@@ -991,14 +1122,26 @@ mod tests {
             opacity: 1.0,
         };
         let projected = ctx.storage_buffer("bwd-projected", &[splat]);
-        let params = TilingParams { width: 32, height: 32, tile_size: 16, depth_max: 100.0 };
+        let params = TilingParams {
+            width: 32,
+            height: 32,
+            tile_size: 16,
+            depth_max: 100.0,
+        };
         let binner = TileBinner::new(&ctx);
         let res = binner.bin(&ctx, &projected, 1, &params);
 
         // Forward composite.
         let raster = Rasterizer::new(&ctx);
         let forward = raster.alloc_image(&ctx, 32, 32);
-        raster.composite(&ctx, &projected, &res.sorted_payloads, &res.tile_ranges, &forward, &params);
+        raster.composite(
+            &ctx,
+            &projected,
+            &res.sorted_payloads,
+            &res.tile_ranges,
+            &forward,
+            &params,
+        );
 
         // Constant per-pixel loss gradient dL/dC = (1, 1, 1, 0). Makes
         // the expected sign of dopacity and dconic.diag positive (any
@@ -1009,13 +1152,22 @@ mod tests {
         // Backward.
         let proj_grad = raster.alloc_projected_grad(&ctx, 1);
         raster.composite_backward(
-            &ctx, &projected, &res.sorted_payloads, &res.tile_ranges,
-            &forward, &dl_dc, &proj_grad, &params,
+            &ctx,
+            &projected,
+            &res.sorted_payloads,
+            &res.tile_ranges,
+            &forward,
+            &dl_dc,
+            &proj_grad,
+            &params,
         );
 
         let grads: Vec<ProjectedGrad> = ctx.readback(&proj_grad, 1);
         let g = &grads[0];
-        eprintln!("dmean_op = {:?} dconic = {:?} dcolor = {:?}", g.dmean_opacity, g.dconic, g.dcolor);
+        eprintln!(
+            "dmean_op = {:?} dconic = {:?} dcolor = {:?}",
+            g.dmean_opacity, g.dconic, g.dcolor
+        );
 
         // Colour grad: every pixel contributes T_i · α_i · 1 → must be > 0.
         assert!(g.dcolor[0] > 0.1, "dcolor.r too small: {}", g.dcolor[0]);
@@ -1024,7 +1176,11 @@ mod tests {
 
         // Opacity grad (at dmean_opacity[2]): same sign as colour grad —
         // raising σ raises α raises C ↑ raises loss.
-        assert!(g.dmean_opacity[2] > 0.01, "dopacity too small: {}", g.dmean_opacity[2]);
+        assert!(
+            g.dmean_opacity[2] > 0.01,
+            "dopacity too small: {}",
+            g.dmean_opacity[2]
+        );
 
         // Conic-diagonal grads (a, c) should be negative: raising a or c
         // makes the Gaussian sharper / smaller-footprint → less area
@@ -1033,13 +1189,29 @@ mod tests {
         // (power = −½(a dx² + …)), and dpower/da = −½ dx². With dx ≠ 0,
         // an increase in a *decreases* G → decreases α → decreases C.
         // So dC/da < 0 → grad < 0 under positive dL/dC.
-        assert!(g.dconic[0] < -1e-4, "dconic.a should be negative: {}", g.dconic[0]);
-        assert!(g.dconic[2] < -1e-4, "dconic.c should be negative: {}", g.dconic[2]);
+        assert!(
+            g.dconic[0] < -1e-4,
+            "dconic.a should be negative: {}",
+            g.dconic[0]
+        );
+        assert!(
+            g.dconic[2] < -1e-4,
+            "dconic.c should be negative: {}",
+            g.dconic[2]
+        );
 
         // 2D-mean gradient — splat is centred and the dL/dC field is
         // perfectly symmetric, so the per-axis sum should net out near 0.
-        assert!(g.dmean_opacity[0].abs() < 0.5, "dmean.x not near 0: {}", g.dmean_opacity[0]);
-        assert!(g.dmean_opacity[1].abs() < 0.5, "dmean.y not near 0: {}", g.dmean_opacity[1]);
+        assert!(
+            g.dmean_opacity[0].abs() < 0.5,
+            "dmean.x not near 0: {}",
+            g.dmean_opacity[0]
+        );
+        assert!(
+            g.dmean_opacity[1].abs() < 0.5,
+            "dmean.y not near 0: {}",
+            g.dmean_opacity[1]
+        );
     }
 
     #[test]
@@ -1064,16 +1236,30 @@ mod tests {
         let g = &gpu_out[0];
 
         assert_eq!(g.visible, 1.0);
-        assert!((g.mean_xy[0] - cpu_out.mean_xy[0]).abs() < 1e-2,
-                "mean_x gpu={} cpu={}", g.mean_xy[0], cpu_out.mean_xy[0]);
+        assert!(
+            (g.mean_xy[0] - cpu_out.mean_xy[0]).abs() < 1e-2,
+            "mean_x gpu={} cpu={}",
+            g.mean_xy[0],
+            cpu_out.mean_xy[0]
+        );
         assert!((g.mean_xy[1] - cpu_out.mean_xy[1]).abs() < 1e-2);
         assert!((g.depth - cpu_out.depth).abs() < 1e-3);
         assert!((g.radius - cpu_out.radius).abs() < 1.0); // ceil() may differ by ±1 ulp
         for i in 0..3 {
-            assert!((g.conic[i] - cpu_out.conic[i]).abs() < 1e-4,
-                    "conic[{}] gpu={} cpu={}", i, g.conic[i], cpu_out.conic[i]);
-            assert!((g.color[i] - cpu_out.color[i]).abs() < 1e-3,
-                    "color[{}] gpu={} cpu={}", i, g.color[i], cpu_out.color[i]);
+            assert!(
+                (g.conic[i] - cpu_out.conic[i]).abs() < 1e-4,
+                "conic[{}] gpu={} cpu={}",
+                i,
+                g.conic[i],
+                cpu_out.conic[i]
+            );
+            assert!(
+                (g.color[i] - cpu_out.color[i]).abs() < 1e-3,
+                "color[{}] gpu={} cpu={}",
+                i,
+                g.color[i],
+                cpu_out.color[i]
+            );
         }
         assert!((g.opacity - cpu_out.opacity).abs() < 1e-5);
     }

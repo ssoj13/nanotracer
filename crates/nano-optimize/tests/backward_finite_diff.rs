@@ -15,11 +15,11 @@
 //! covariance sandwich, quaternion → rotation, view projection.
 
 use glam::Vec3;
+use nano_optimize::gpu::WgpuCtx;
 use nano_optimize::raster::{CameraUniform, Rasterizer};
 use nano_optimize::splat_gpu::{GpuSplatBuffer, GradSplatBuffers};
 use nano_optimize::splat_store::SplatBuffer;
 use nano_optimize::tile_binner::{TileBinner, TilingParams};
-use nano_optimize::gpu::WgpuCtx;
 
 const W: u32 = 32;
 const H: u32 = 32;
@@ -32,11 +32,11 @@ fn base_splats() -> SplatBuffer {
     rest[0] = 0.05;
     rest[20] = -0.03;
     buf.push_splat(
-        Vec3::new(0.0, 0.0, -5.0),                       // pos
-        [1.0, 0.0, 0.0, 0.0],                            // identity quat (w, x, y, z)
-        [-0.5, -0.6, -0.7],                              // log σ → σ ≈ (0.6, 0.55, 0.5)
-        2.0,                                             // opacity logit → σ(2) ≈ 0.88
-        [0.4, 0.3, 0.2],                                 // SH DC
+        Vec3::new(0.0, 0.0, -5.0), // pos
+        [1.0, 0.0, 0.0, 0.0],      // identity quat (w, x, y, z)
+        [-0.5, -0.6, -0.7],        // log σ → σ ≈ (0.6, 0.55, 0.5)
+        2.0,                       // opacity logit → σ(2) ≈ 0.88
+        [0.4, 0.3, 0.2],           // SH DC
         &rest,
     );
     buf
@@ -61,10 +61,22 @@ fn forward_loss(ctx: &WgpuCtx, splats: &SplatBuffer) -> f32 {
     let binner = TileBinner::new(ctx);
     let projected = raster.alloc_projected(ctx, gpu.n);
     raster.project(ctx, &gpu, &cam, &projected);
-    let params = TilingParams { width: W, height: H, tile_size: 16, depth_max: 50.0 };
+    let params = TilingParams {
+        width: W,
+        height: H,
+        tile_size: 16,
+        depth_max: 50.0,
+    };
     let res = binner.bin(ctx, &projected, gpu.n, &params);
     let img = raster.alloc_image(ctx, W, H);
-    raster.composite(ctx, &projected, &res.sorted_payloads, &res.tile_ranges, &img, &params);
+    raster.composite(
+        ctx,
+        &projected,
+        &res.sorted_payloads,
+        &res.tile_ranges,
+        &img,
+        &params,
+    );
     let pix: Vec<[f32; 4]> = ctx.readback(&img, N_PIX);
     let mut sum: f64 = 0.0;
     for p in &pix {
@@ -81,7 +93,7 @@ struct AnalyticGrads {
     scale: [f32; 4],
     opacity: f32,
     sh_dc: [f32; 4],
-    sh_rest_0: f32,  // first band-1 coefficient (R channel, index 0 in rest)
+    sh_rest_0: f32, // first band-1 coefficient (R channel, index 0 in rest)
 }
 
 fn analytic_grads(ctx: &WgpuCtx, splats: &SplatBuffer) -> AnalyticGrads {
@@ -92,17 +104,37 @@ fn analytic_grads(ctx: &WgpuCtx, splats: &SplatBuffer) -> AnalyticGrads {
 
     let projected = raster.alloc_projected(ctx, gpu.n);
     raster.project(ctx, &gpu, &cam, &projected);
-    let params = TilingParams { width: W, height: H, tile_size: 16, depth_max: 50.0 };
+    let params = TilingParams {
+        width: W,
+        height: H,
+        tile_size: 16,
+        depth_max: 50.0,
+    };
     let res = binner.bin(ctx, &projected, gpu.n, &params);
     let img = raster.alloc_image(ctx, W, H);
-    raster.composite(ctx, &projected, &res.sorted_payloads, &res.tile_ranges, &img, &params);
+    raster.composite(
+        ctx,
+        &projected,
+        &res.sorted_payloads,
+        &res.tile_ranges,
+        &img,
+        &params,
+    );
 
     // dL/dC = (1, 1, 1, 0) per pixel — loss is Σ rgb.
     let dl_dc_vec = vec![[1.0_f32, 1.0, 1.0, 0.0]; N_PIX];
     let dl_dc = ctx.storage_buffer("dl_dc", &dl_dc_vec);
     let proj_grad = raster.alloc_projected_grad(ctx, gpu.n);
-    raster.composite_backward(ctx, &projected, &res.sorted_payloads, &res.tile_ranges,
-                              &img, &dl_dc, &proj_grad, &params);
+    raster.composite_backward(
+        ctx,
+        &projected,
+        &res.sorted_payloads,
+        &res.tile_ranges,
+        &img,
+        &dl_dc,
+        &proj_grad,
+        &params,
+    );
     let grads = GradSplatBuffers::new(ctx, gpu.n);
     raster.project_backward(ctx, &gpu, &proj_grad, &cam, &grads);
 
@@ -149,38 +181,66 @@ fn finite_diff_matches_analytic() {
     };
     let s = base_splats();
     let g = analytic_grads(&ctx, &s);
-    eprintln!("analytic: pos={:?} sh_dc={:?} opacity={} scale={:?} rot={:?}",
-              g.pos, g.sh_dc, g.opacity, g.scale, g.rot);
+    eprintln!(
+        "analytic: pos={:?} sh_dc={:?} opacity={} scale={:?} rot={:?}",
+        g.pos, g.sh_dc, g.opacity, g.scale, g.rot
+    );
 
     // sh_dc — strictly linear in colour → tight tolerance.
     let n_sh_dc_r = numerical(&ctx, &s, |b, e| b.sh_dc[0][0] += e);
     eprintln!("sh_dc.r analytic={} numerical={}", g.sh_dc[0], n_sh_dc_r);
-    assert!(close(g.sh_dc[0], n_sh_dc_r, 0.02, 0.05),
-            "sh_dc.r mismatch: analytic={} numerical={}", g.sh_dc[0], n_sh_dc_r);
+    assert!(
+        close(g.sh_dc[0], n_sh_dc_r, 0.02, 0.05),
+        "sh_dc.r mismatch: analytic={} numerical={}",
+        g.sh_dc[0],
+        n_sh_dc_r
+    );
 
     // opacity_logit — sigmoid chain.
     let n_op = numerical(&ctx, &s, |b, e| b.opacities[0] += e);
     eprintln!("opacity analytic={} numerical={}", g.opacity, n_op);
-    assert!(close(g.opacity, n_op, 0.05, 0.05),
-            "opacity mismatch: analytic={} numerical={}", g.opacity, n_op);
+    assert!(
+        close(g.opacity, n_op, 0.05, 0.05),
+        "opacity mismatch: analytic={} numerical={}",
+        g.opacity,
+        n_op
+    );
 
     // sh_rest[0] (band-1 R channel coefficient): basis chain.
     let n_sh_rest_0 = numerical(&ctx, &s, |b, e| b.sh_rest[0] += e);
-    eprintln!("sh_rest[0] analytic={} numerical={}", g.sh_rest_0, n_sh_rest_0);
-    assert!(close(g.sh_rest_0, n_sh_rest_0, 0.05, 0.05),
-            "sh_rest[0] mismatch: analytic={} numerical={}", g.sh_rest_0, n_sh_rest_0);
+    eprintln!(
+        "sh_rest[0] analytic={} numerical={}",
+        g.sh_rest_0, n_sh_rest_0
+    );
+    assert!(
+        close(g.sh_rest_0, n_sh_rest_0, 0.05, 0.05),
+        "sh_rest[0] mismatch: analytic={} numerical={}",
+        g.sh_rest_0,
+        n_sh_rest_0
+    );
 
     // position.x: chains through view projection. Tolerance looser
     // because (a) we ignore the dir-dependence of SH on p_world by design
     // and (b) the projection is the most non-linear path.
     let n_pos_x = numerical(&ctx, &s, |b, e| b.positions[0].x += e);
     eprintln!("pos.x analytic={} numerical={}", g.pos[0], n_pos_x);
-    assert!(close(g.pos[0], n_pos_x, 0.10, 0.5),
-            "pos.x mismatch: analytic={} numerical={}", g.pos[0], n_pos_x);
+    assert!(
+        close(g.pos[0], n_pos_x, 0.10, 0.5),
+        "pos.x mismatch: analytic={} numerical={}",
+        g.pos[0],
+        n_pos_x
+    );
 
     // log-scale x: chains through Σ_3D → Σ_2D → conic.
     let n_scale_x = numerical(&ctx, &s, |b, e| b.scales[0][0] += e);
-    eprintln!("log_scale.x analytic={} numerical={}", g.scale[0], n_scale_x);
-    assert!(close(g.scale[0], n_scale_x, 0.10, 0.5),
-            "log_scale.x mismatch: analytic={} numerical={}", g.scale[0], n_scale_x);
+    eprintln!(
+        "log_scale.x analytic={} numerical={}",
+        g.scale[0], n_scale_x
+    );
+    assert!(
+        close(g.scale[0], n_scale_x, 0.10, 0.5),
+        "log_scale.x mismatch: analytic={} numerical={}",
+        g.scale[0],
+        n_scale_x
+    );
 }

@@ -36,7 +36,8 @@ impl WgpuCtx {
         // Headless context — no display handle needed for compute work.
         // The env-aware helper still honours `WGPU_BACKEND`, validation
         // flags, and other tunables a user might want to override.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
