@@ -1,22 +1,25 @@
-//! Interactive splat viewer — winit window + wgpu surface, reuses the
-//! `nano-optimize` rasteriser (project + bin + composite) per frame.
+//! Interactive splat viewer — winit window + wgpu surface + egui_dock UI.
 //!
-//! v1 takes a CPU `SplatBuffer` (e.g. fresh from the forward fit) and
-//! renders it in an orbit-camera window. Mouse-LMB drag rotates around
-//! the scene centroid, scroll-wheel zooms. ESC quits.
+//! Architecture per frame:
 //!
-//! PLY-on-disk loading is a follow-up (`B1.x` — `nano-splat` already
-//! has the `Gaussian` Pod, just needs a reader).
+//!   1. winit events → orbit camera state + egui_winit input integration.
+//!   2. GPU compute pipeline: project → bin → composite (vec4f buffer)
+//!      → tonemap (rgba8unorm storage texture).
+//!   3. egui pass: dock layout with a `Viewport` tab (sampling the
+//!      tonemapped texture via `egui::Image`) and an `Inspector` tab
+//!      (HUD: FPS, splat count, camera pose, FoV slider).
+//!   4. `egui_wgpu::Renderer` renders the egui draw lists into the
+//!      swapchain texture; surface presents.
 //!
-//! Surface presentation uses a CPU readback path: composite → readback
-//! `vec4<f32>` buffer → CPU tonemap + sRGB-encode to `u8` → `write_texture`
-//! to the swapchain → present. Trades ~3 MiB/frame of host-side copy
-//! for zero new shaders, and stays well above 60 fps at 1024×768 on a
-//! discrete GPU. A future revision can land a `tonemap.wgsl` + blit
-//! fragment shader to keep everything on the GPU.
+//! No CPU readback in the present path — the splat image stays on the
+//! GPU all the way to the swapchain. The previous CPU-readback fallback
+//! has been retired.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 
+use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use glam::Vec3;
 use nano_optimize::raster::CameraUniform;
 use nano_optimize::splat_gpu::GpuSplatBuffer;
@@ -29,8 +32,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 /// Open the viewer window on `splats`. Blocks until the user closes
-/// the window. The splat buffer is uploaded to the GPU once at startup
-/// and is read by the rasteriser every frame.
+/// the window.
 pub fn run(splats: SplatBuffer) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let mut app = ViewerApp::new(splats);
@@ -38,14 +40,14 @@ pub fn run(splats: SplatBuffer) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Orbit camera around the scene centroid. `target` is the look-at
-/// point; `azimuth` rotates in the XZ plane; `elevation` tilts above
-/// the plane; `distance` is the world-space radius.
+/// Orbit camera around the scene centroid. LMB drag rotates,
+/// scroll-wheel zooms; the dock UI exposes a FoV slider.
 struct OrbitCamera {
     target: Vec3,
     distance: f32,
     azimuth: f32,
     elevation: f32,
+    fov_y: f32,
 }
 
 impl OrbitCamera {
@@ -66,21 +68,44 @@ struct DragState {
     last_y: f64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Viewport,
+    Inspector,
+}
+
+/// Per-frame UI state shared between the dock tabs.
+struct UiState {
+    splat_texture_id: egui::TextureId,
+    image_size: [u32; 2],
+    splat_count: u32,
+    fps: f32,
+    fov_y_deg: f32,
+    azimuth: f32,
+    elevation: f32,
+    distance: f32,
+    target: Vec3,
+    /// Set by the Viewport tab each frame so the host knows the size
+    /// of the area we should render into for the next frame.
+    requested_viewport_size: [u32; 2],
+}
+
 struct ViewerApp {
-    splats: Option<SplatBuffer>,
     window: Option<Arc<Window>>,
     state: Option<State>,
+    splats: Option<SplatBuffer>,
     orbit: OrbitCamera,
     drag: DragState,
+    dock: DockState<Tab>,
 }
 
 impl ViewerApp {
     fn new(splats: SplatBuffer) -> Self {
-        // Place the orbit centre at the scene centroid so the first
-        // view sees the cloud. Distance 1.5× the bbox extent gives a
-        // comfortable framing.
         let (centroid, extent) = scene_centroid_extent(&splats);
         let distance = (extent.max_element() * 1.5).max(2.0);
+        let mut dock = DockState::new(vec![Tab::Viewport]);
+        let surface = dock.main_surface_mut();
+        surface.split_right(NodeIndex::root(), 0.78, vec![Tab::Inspector]);
         Self {
             splats: Some(splats),
             window: None,
@@ -90,8 +115,10 @@ impl ViewerApp {
                 distance,
                 azimuth: 0.0,
                 elevation: 0.3,
+                fov_y: std::f32::consts::FRAC_PI_3,
             },
             drag: DragState::default(),
+            dock,
         }
     }
 }
@@ -116,10 +143,10 @@ impl ApplicationHandler for ViewerApp {
         }
         let attrs = Window::default_attributes()
             .with_title("nano-view")
-            .with_inner_size(PhysicalSize::new(1024u32, 768u32));
+            .with_inner_size(PhysicalSize::new(1280u32, 800u32));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.window = Some(window.clone());
-        let splats = self.splats.take().expect("splats only consumed once");
+        let splats = self.splats.take().expect("splats consumed once");
         self.state = Some(State::new(window.clone(), splats).expect("State::new"));
         window.request_redraw();
     }
@@ -133,6 +160,11 @@ impl ApplicationHandler for ViewerApp {
         let (Some(window), Some(state)) = (self.window.as_ref(), self.state.as_mut()) else {
             return;
         };
+        // Let egui consume input first; if egui claims it, skip the
+        // viewer's own handlers (e.g. typing in a numeric box).
+        let response = state.egui_state.on_window_event(window, &event);
+        let captured_pointer = state.egui_ctx.is_pointer_over_area();
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
@@ -143,22 +175,20 @@ impl ApplicationHandler for ViewerApp {
                         ..
                     },
                 ..
-            } => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                state.resize(size);
-            }
+            } if !response.consumed => event_loop.exit(),
+            WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::MouseInput {
                 state: btn_state,
                 button: MouseButton::Left,
                 ..
-            } => {
+            } if !captured_pointer => {
                 self.drag.active = matches!(btn_state, ElementState::Pressed);
                 if !self.drag.active {
                     self.drag.last_x = 0.0;
                     self.drag.last_y = 0.0;
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::CursorMoved { position, .. } if !captured_pointer => {
                 if self.drag.active {
                     if self.drag.last_x != 0.0 || self.drag.last_y != 0.0 {
                         let dx = (position.x - self.drag.last_x) as f32;
@@ -171,7 +201,7 @@ impl ApplicationHandler for ViewerApp {
                     self.drag.last_y = position.y;
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !captured_pointer => {
                 let s = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => (p.y as f32) * 0.05,
@@ -179,11 +209,19 @@ impl ApplicationHandler for ViewerApp {
                 self.orbit.distance = (self.orbit.distance * (1.0 - s * 0.1)).clamp(0.5, 500.0);
             }
             WindowEvent::RedrawRequested => {
-                state.render(&self.orbit);
-                window.request_redraw();
+                let window_clone = window.clone();
+                self.frame(&window_clone);
+                window_clone.request_redraw();
             }
             _ => {}
         }
+    }
+}
+
+impl ViewerApp {
+    fn frame(&mut self, window: &Arc<Window>) {
+        let Some(state) = self.state.as_mut() else { return; };
+        state.frame(window, &mut self.orbit, &mut self.dock);
     }
 }
 
@@ -191,13 +229,32 @@ struct State {
     ctx: WgpuCtx,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
+    size: PhysicalSize<u32>,
+
     rasterizer: Rasterizer,
     binner: TileBinner,
     gpu_splats: GpuSplatBuffer,
+
+    // Per-frame GPU resources sized to the viewport tab.
+    image_w: u32,
+    image_h: u32,
     projected: wgpu::Buffer,
-    image_buf: wgpu::Buffer,
-    size: PhysicalSize<u32>,
+    composite_buf: wgpu::Buffer,
+    splat_tex: wgpu::Texture,
+    splat_view: wgpu::TextureView,
+
+    // egui glue.
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    splat_texture_id: egui::TextureId,
+
+    // Frame stats.
+    frame_times: VecDeque<Instant>,
 }
+
+const VIEWPORT_TEX_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const DEFAULT_VIEWPORT: (u32, u32) = (960, 720);
 
 impl State {
     fn new(
@@ -227,6 +284,8 @@ impl State {
             },
         ))?;
         let caps = surface.get_capabilities(&adapter);
+        // egui-wgpu prefers an sRGB swapchain so its UI colours are
+        // gamma-correct out of the box.
         let surface_format = caps
             .formats
             .iter()
@@ -235,27 +294,59 @@ impl State {
             .unwrap_or(caps.formats[0]);
         configure_surface(&surface, &device, surface_format, size, caps.alpha_modes[0]);
 
-        let ctx = WgpuCtx {
-            instance,
-            adapter,
-            device,
-            queue,
-        };
+        let ctx = WgpuCtx { instance, adapter, device, queue };
         let rasterizer = Rasterizer::new(&ctx);
         let binner = TileBinner::new(&ctx);
         let gpu_splats = GpuSplatBuffer::upload(&ctx, &splats);
-        let (projected, image_buf) = alloc_render_buffers(&ctx, &rasterizer, &gpu_splats, size);
+
+        let (image_w, image_h) = DEFAULT_VIEWPORT;
+        let projected = ctx.storage_buffer_zeroed(
+            "view-projected",
+            (gpu_splats.n as u64)
+                * std::mem::size_of::<nano_optimize::ProjectedSplat>() as u64,
+        );
+        let composite_buf = rasterizer.alloc_image(&ctx, image_w, image_h);
+        let (splat_tex, splat_view) = make_splat_texture(&ctx.device, image_w, image_h);
+
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &*window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+        let mut egui_renderer = egui_wgpu::Renderer::new(
+            &ctx.device,
+            surface_format,
+            egui_wgpu::RendererOptions::default(),
+        );
+        let splat_texture_id = egui_renderer.register_native_texture(
+            &ctx.device,
+            &splat_view,
+            wgpu::FilterMode::Linear,
+        );
 
         Ok(Self {
             ctx,
             surface,
             surface_format,
+            size,
             rasterizer,
             binner,
             gpu_splats,
+            image_w,
+            image_h,
             projected,
-            image_buf,
-            size,
+            composite_buf,
+            splat_tex,
+            splat_view,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
+            splat_texture_id,
+            frame_times: VecDeque::with_capacity(120),
         })
     }
 
@@ -272,119 +363,268 @@ impl State {
             new_size,
             caps.alpha_modes[0],
         );
-        // image_buf grows with image dimensions; projected stays fixed.
-        let (_, image_buf) =
-            alloc_render_buffers(&self.ctx, &self.rasterizer, &self.gpu_splats, new_size);
-        self.image_buf = image_buf;
     }
 
-    fn render(&self, orbit: &OrbitCamera) {
-        let surface_tex = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            // Outdated / Lost / Timeout / Occluded / Validation — skip
-            // this frame, the next resize / redraw will recover.
-            _ => return,
-        };
-        let w = self.size.width;
-        let h = self.size.height;
-        let cam_pos = orbit.position();
-        let camera = CameraUniform::from_pose(
-            cam_pos,
+    /// Reallocate the render targets to match the viewport tab's size
+    /// (called when the tab is resized by dragging the dock split).
+    fn resize_viewport(&mut self, new_w: u32, new_h: u32) {
+        if (new_w, new_h) == (self.image_w, self.image_h) {
+            return;
+        }
+        self.image_w = new_w.max(1);
+        self.image_h = new_h.max(1);
+        self.composite_buf = self.rasterizer.alloc_image(&self.ctx, self.image_w, self.image_h);
+        let (tex, view) = make_splat_texture(&self.ctx.device, self.image_w, self.image_h);
+        self.splat_tex = tex;
+        self.splat_view = view;
+        // egui caches texture bindings — update the registered slot.
+        self.egui_renderer
+            .update_egui_texture_from_wgpu_texture(
+                &self.ctx.device,
+                &self.splat_view,
+                wgpu::FilterMode::Linear,
+                self.splat_texture_id,
+            );
+    }
+
+    fn frame(&mut self, window: &Arc<Window>, orbit: &mut OrbitCamera, dock: &mut DockState<Tab>) {
+        // ── Compute pass: project + bin + composite + tonemap ─────────
+        let cam = CameraUniform::from_pose(
+            orbit.position(),
             orbit.target,
             Vec3::Y,
-            std::f32::consts::FRAC_PI_3, // 60° FoV
-            w,
-            h,
+            orbit.fov_y,
+            self.image_w,
+            self.image_h,
             self.gpu_splats.n,
         );
-
-        // GPU: project + bin + composite.
         self.rasterizer
-            .project(&self.ctx, &self.gpu_splats, &camera, &self.projected);
+            .project(&self.ctx, &self.gpu_splats, &cam, &self.projected);
         let params = TilingParams {
-            width: w,
-            height: h,
+            width: self.image_w,
+            height: self.image_h,
             tile_size: 16,
             depth_max: (orbit.distance * 4.0).max(50.0),
         };
-        let bins = self.binner.bin(&self.ctx, &self.projected, self.gpu_splats.n, &params);
+        let bins = self
+            .binner
+            .bin(&self.ctx, &self.projected, self.gpu_splats.n, &params);
         self.rasterizer.composite(
             &self.ctx,
             &self.projected,
             &bins.sorted_payloads,
             &bins.tile_ranges,
-            &self.image_buf,
+            &self.composite_buf,
             &params,
         );
+        self.rasterizer.tonemap(
+            &self.ctx,
+            &self.composite_buf,
+            &self.splat_view,
+            self.image_w,
+            self.image_h,
+        );
 
-        // Readback → tonemap → sRGB → swapchain.
-        let pixels: Vec<[f32; 4]> = self.ctx.readback(&self.image_buf, (w * h) as usize);
-        let mut rgba: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
-        let srgb_target = self.surface_format.is_srgb();
-        for p in &pixels {
-            // Reinhard tonemap then optional linear-to-sRGB (the
-            // swapchain handles encoding itself when surface_format is
-            // an *_SRGB variant; otherwise we encode here).
-            let r = p[0] / (1.0 + p[0]);
-            let g = p[1] / (1.0 + p[1]);
-            let b = p[2] / (1.0 + p[2]);
-            let (r8, g8, b8) = if srgb_target {
-                ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+        // ── Frame stats ───────────────────────────────────────────────
+        let now = Instant::now();
+        self.frame_times.push_back(now);
+        while let Some(t) = self.frame_times.front() {
+            if now.duration_since(*t).as_secs_f32() > 1.0 {
+                self.frame_times.pop_front();
             } else {
-                (
-                    (linear_to_srgb(r) * 255.0) as u8,
-                    (linear_to_srgb(g) * 255.0) as u8,
-                    (linear_to_srgb(b) * 255.0) as u8,
-                )
-            };
-            // BGRA or RGBA depending on surface_format. is_srgb covers
-            // both — read components in the order the format expects.
-            if matches!(
-                self.surface_format,
-                wgpu::TextureFormat::Bgra8Unorm
-                    | wgpu::TextureFormat::Bgra8UnormSrgb
-            ) {
-                rgba.extend_from_slice(&[b8, g8, r8, 255]);
-            } else {
-                rgba.extend_from_slice(&[r8, g8, b8, 255]);
+                break;
             }
         }
-        self.ctx.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &surface_tex.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(h),
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
+        let fps = self.frame_times.len() as f32;
+
+        // ── egui pass ─────────────────────────────────────────────────
+        let raw_input = self.egui_state.take_egui_input(window);
+        let mut ui_state = UiState {
+            splat_texture_id: self.splat_texture_id,
+            image_size: [self.image_w, self.image_h],
+            splat_count: self.gpu_splats.n,
+            fps,
+            fov_y_deg: orbit.fov_y.to_degrees(),
+            azimuth: orbit.azimuth,
+            elevation: orbit.elevation,
+            distance: orbit.distance,
+            target: orbit.target,
+            requested_viewport_size: [self.image_w, self.image_h],
+        };
+        let output = self.egui_ctx.clone().run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut viewer = DockedTabs { state: &mut ui_state };
+                DockArea::new(dock)
+                    .style(Style::from_egui(ctx.style().as_ref()))
+                    .show_inside(ui, &mut viewer);
+            });
+        });
+        // Push any UI-side mutations back out (FoV slider).
+        orbit.fov_y = ui_state.fov_y_deg.to_radians().clamp(
+            std::f32::consts::FRAC_PI_8,
+            std::f32::consts::PI - 0.1,
         );
+        let req = ui_state.requested_viewport_size;
+        self.resize_viewport(req[0], req[1]);
+
+        self.egui_state
+            .handle_platform_output(window, output.platform_output);
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(output.shapes, output.pixels_per_point);
+        let screen_desc = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.size.width, self.size.height],
+            pixels_per_point: output.pixels_per_point,
+        };
+
+        // ── Surface render ────────────────────────────────────────────
+        let surface_tex = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => return,
+        };
+        let surface_view = surface_tex
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder =
+            self.ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("egui-encoder"),
+                });
+        for (id, delta) in &output.textures_delta.set {
+            self.egui_renderer
+                .update_texture(&self.ctx.device, &self.ctx.queue, *id, delta);
+        }
+        self.egui_renderer.update_buffers(
+            &self.ctx.device,
+            &self.ctx.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_desc,
+        );
+        {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.04,
+                            g: 0.04,
+                            b: 0.05,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let mut rp = render_pass.forget_lifetime();
+            self.egui_renderer
+                .render(&mut rp, &paint_jobs, &screen_desc);
+        }
+        for id in &output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+        self.ctx
+            .queue
+            .submit(std::iter::once(encoder.finish()));
         surface_tex.present();
     }
 }
 
-fn alloc_render_buffers(
-    ctx: &WgpuCtx,
-    rasterizer: &Rasterizer,
-    gpu_splats: &GpuSplatBuffer,
-    size: PhysicalSize<u32>,
-) -> (wgpu::Buffer, wgpu::Buffer) {
-    let projected = ctx.storage_buffer_zeroed(
-        "view-projected",
-        (gpu_splats.n as u64) * std::mem::size_of::<nano_optimize::ProjectedSplat>() as u64,
-    );
-    let image_buf = rasterizer.alloc_image(ctx, size.width.max(1), size.height.max(1));
-    (projected, image_buf)
+/// egui_dock `TabViewer` impl — drawing logic for each tab kind.
+struct DockedTabs<'a> {
+    state: &'a mut UiState,
+}
+
+impl TabViewer for DockedTabs<'_> {
+    type Tab = Tab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        match tab {
+            Tab::Viewport => "Viewport".into(),
+            Tab::Inspector => "Inspector".into(),
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            Tab::Viewport => {
+                let available = ui.available_size_before_wrap();
+                // Round to multiples of the tile size — keeps the
+                // rasteriser's workgroups happy and avoids reallocating
+                // every single mouse pixel.
+                let w = (available.x.max(64.0) as u32).max(64).next_multiple_of(16);
+                let h = (available.y.max(64.0) as u32).max(64).next_multiple_of(16);
+                self.state.requested_viewport_size = [w, h];
+                let aspect = w as f32 / h as f32;
+                let img_h = available.y;
+                let img_w = img_h * aspect;
+                ui.add(
+                    egui::Image::from_texture((
+                        self.state.splat_texture_id,
+                        egui::vec2(img_w, img_h),
+                    ))
+                    .fit_to_exact_size(egui::vec2(img_w, img_h)),
+                );
+            }
+            Tab::Inspector => {
+                ui.heading("Stats");
+                ui.label(format!("Splats: {}", self.state.splat_count));
+                ui.label(format!(
+                    "Viewport: {}×{}",
+                    self.state.image_size[0], self.state.image_size[1]
+                ));
+                ui.label(format!("FPS: {:.1}", self.state.fps));
+                ui.separator();
+                ui.heading("Camera");
+                ui.add(
+                    egui::Slider::new(&mut self.state.fov_y_deg, 20.0..=120.0)
+                        .text("FoV (vertical, °)"),
+                );
+                ui.label(format!("Azimuth: {:.2}", self.state.azimuth));
+                ui.label(format!("Elevation: {:.2}", self.state.elevation));
+                ui.label(format!("Distance: {:.2}", self.state.distance));
+                ui.label(format!(
+                    "Target: ({:.2}, {:.2}, {:.2})",
+                    self.state.target.x, self.state.target.y, self.state.target.z
+                ));
+                ui.separator();
+                ui.small("LMB drag: orbit · scroll: zoom · ESC: quit");
+            }
+        }
+    }
+}
+
+fn make_splat_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("splat-tex"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: VIEWPORT_TEX_FORMAT,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 fn configure_surface(
@@ -397,7 +637,7 @@ fn configure_surface(
     surface.configure(
         device,
         &wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -407,13 +647,4 @@ fn configure_surface(
             desired_maximum_frame_latency: 2,
         },
     );
-}
-
-fn linear_to_srgb(v: f32) -> f32 {
-    let v = v.clamp(0.0, 1.0);
-    if v <= 0.0031308 {
-        v * 12.92
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    }
 }

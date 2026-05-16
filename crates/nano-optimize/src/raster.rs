@@ -120,6 +120,17 @@ pub struct Rasterizer {
     composite_backward_bgl: wgpu::BindGroupLayout,
     project_backward_pipeline: wgpu::ComputePipeline,
     project_backward_bgl: wgpu::BindGroupLayout,
+    tonemap_pipeline: wgpu::ComputePipeline,
+    tonemap_bgl: wgpu::BindGroupLayout,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TonemapParams {
+    width: u32,
+    height: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 impl Rasterizer {
@@ -332,6 +343,52 @@ impl Rasterizer {
                     cache: None,
                 });
 
+        // Tonemap pipeline ---------------------------------------------
+        let tonemap_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("tonemap"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/tonemap.wgsl").into(),
+                ),
+            });
+        let tonemap_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tonemap-bgl"),
+                entries: &[
+                    bgl_entry(0, storage_ro),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    bgl_entry(2, uniform),
+                ],
+            });
+        let tonemap_layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tonemap-pl"),
+                bind_group_layouts: &[Some(&tonemap_bgl)],
+                immediate_size: 0,
+            });
+        let tonemap_pipeline =
+            ctx.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("tonemap-pipeline"),
+                    layout: Some(&tonemap_layout),
+                    module: &tonemap_module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
         Self {
             project_pipeline,
             project_bgl,
@@ -341,7 +398,48 @@ impl Rasterizer {
             composite_backward_bgl,
             project_backward_pipeline,
             project_backward_bgl,
+            tonemap_pipeline,
+            tonemap_bgl,
         }
+    }
+
+    /// Reinhard tonemap + sRGB encode + quantise to `Rgba8Unorm`. The
+    /// destination must be a storage texture of the same `(width, height)`
+    /// as the composite buffer; egui samples it as a plain `egui::Image`.
+    pub fn tonemap(
+        &self,
+        ctx: &WgpuCtx,
+        composite: &wgpu::Buffer,
+        target: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        let params = ctx.uniform_buffer(
+            "tonemap-params",
+            &TonemapParams { width, height, _pad0: 0, _pad1: 0 },
+        );
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tonemap-bg"),
+            layout: &self.tonemap_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: composite.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(target) },
+                wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+            ],
+        });
+        let mut encoder = ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("tonemap-enc") },
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("tonemap-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.tonemap_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(width.div_ceil(16), height.div_ceil(16), 1);
+        }
+        ctx.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Allocate the per-pixel `vec4` storage buffer used by the

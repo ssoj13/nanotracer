@@ -13,3 +13,14 @@ bytemuck      = { workspace = true }
 wgpu          = { workspace = true }
 winit         = "0.30"
 pollster      = { workspace = true }
+
+# egui ecosystem. egui-wgpu pins its own wgpu version internally — if
+# the resolver can pick our `wgpu = 29` here we get a single matching
+# binding; otherwise cargo will pull both. The user-facing `nano-view`
+# only re-exports types through the shared device, so a duplicate
+# wgpu crate would refuse to link.
+egui       = "0.34"
+egui-wgpu  = { version = "0.34", default-features = false, features = ["winit"] }
+egui-winit = { version = "0.34", default-features = false }
+egui_dock  = "0.19"
+egui_plot  = "0.35"
