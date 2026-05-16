@@ -62,10 +62,13 @@ impl OrbitCamera {
 }
 
 #[derive(Default)]
-struct DragState {
-    active: bool,
+struct InputState {
+    lmb: bool,
+    rmb: bool,
     last_x: f64,
     last_y: f64,
+    /// WASD + Q/E for fly mode (Q = down, E = up).
+    w: bool, a: bool, s: bool, d: bool, q: bool, e: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,7 +98,7 @@ struct ViewerApp {
     state: Option<State>,
     splats: Option<SplatBuffer>,
     orbit: OrbitCamera,
-    drag: DragState,
+    input: InputState,
     dock: DockState<Tab>,
 }
 
@@ -117,7 +120,7 @@ impl ViewerApp {
                 elevation: 0.3,
                 fov_y: std::f32::consts::FRAC_PI_3,
             },
-            drag: DragState::default(),
+            input: InputState::default(),
             dock,
         }
     }
@@ -176,29 +179,74 @@ impl ApplicationHandler for ViewerApp {
                     },
                 ..
             } if !response.consumed => event_loop.exit(),
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(code),
+                    state: key_state,
+                    ..
+                },
+                ..
+            } if !response.consumed => {
+                let pressed = matches!(key_state, ElementState::Pressed);
+                match code {
+                    KeyCode::KeyW => self.input.w = pressed,
+                    KeyCode::KeyA => self.input.a = pressed,
+                    KeyCode::KeyS => self.input.s = pressed,
+                    KeyCode::KeyD => self.input.d = pressed,
+                    KeyCode::KeyQ => self.input.q = pressed,
+                    KeyCode::KeyE => self.input.e = pressed,
+                    _ => {}
+                }
+            }
             WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::MouseInput {
                 state: btn_state,
                 button: MouseButton::Left,
                 ..
             } if !captured_pointer => {
-                self.drag.active = matches!(btn_state, ElementState::Pressed);
-                if !self.drag.active {
-                    self.drag.last_x = 0.0;
-                    self.drag.last_y = 0.0;
+                self.input.lmb = matches!(btn_state, ElementState::Pressed);
+                if !self.input.lmb {
+                    self.input.last_x = 0.0;
+                    self.input.last_y = 0.0;
+                }
+            }
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button: MouseButton::Right,
+                ..
+            } if !captured_pointer => {
+                self.input.rmb = matches!(btn_state, ElementState::Pressed);
+                if !self.input.rmb && !self.input.lmb {
+                    self.input.last_x = 0.0;
+                    self.input.last_y = 0.0;
                 }
             }
             WindowEvent::CursorMoved { position, .. } if !captured_pointer => {
-                if self.drag.active {
-                    if self.drag.last_x != 0.0 || self.drag.last_y != 0.0 {
-                        let dx = (position.x - self.drag.last_x) as f32;
-                        let dy = (position.y - self.drag.last_y) as f32;
-                        self.orbit.azimuth += dx * 0.005;
-                        self.orbit.elevation =
-                            (self.orbit.elevation - dy * 0.005).clamp(-1.5, 1.5);
+                if self.input.lmb || self.input.rmb {
+                    if self.input.last_x != 0.0 || self.input.last_y != 0.0 {
+                        let dx = (position.x - self.input.last_x) as f32;
+                        let dy = (position.y - self.input.last_y) as f32;
+                        if self.input.lmb {
+                            // LMB drag — orbit.
+                            self.orbit.azimuth += dx * 0.005;
+                            self.orbit.elevation =
+                                (self.orbit.elevation - dy * 0.005).clamp(-1.5, 1.5);
+                        } else if self.input.rmb {
+                            // RMB drag — pan target in the camera's
+                            // screen plane. Pan magnitude scales with
+                            // distance so the feel is consistent at
+                            // any zoom level.
+                            let cam_pos = self.orbit.position();
+                            let forward = (self.orbit.target - cam_pos).normalize_or_zero();
+                            let world_up = Vec3::Y;
+                            let right = forward.cross(world_up).normalize_or_zero();
+                            let up = right.cross(forward).normalize_or_zero();
+                            let scale = self.orbit.distance * 0.002;
+                            self.orbit.target -= right * (dx * scale) - up * (dy * scale);
+                        }
                     }
-                    self.drag.last_x = position.x;
-                    self.drag.last_y = position.y;
+                    self.input.last_x = position.x;
+                    self.input.last_y = position.y;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if !captured_pointer => {
@@ -209,6 +257,23 @@ impl ApplicationHandler for ViewerApp {
                 self.orbit.distance = (self.orbit.distance * (1.0 - s * 0.1)).clamp(0.5, 500.0);
             }
             WindowEvent::RedrawRequested => {
+                // Apply per-frame WASD / QE translation in the camera
+                // frame. Speed is proportional to current distance —
+                // moving a far-away cloud at 1 m/frame would feel
+                // glacial; moving a 1 m cloud at 100 m/frame would
+                // be unusable. Roughly 1% of distance per pressed
+                // key per frame ≈ a sensible default at 60 fps.
+                let step = self.orbit.distance * 0.01;
+                let cam_pos = self.orbit.position();
+                let forward = (self.orbit.target - cam_pos).normalize_or_zero();
+                let right = forward.cross(Vec3::Y).normalize_or_zero();
+                let up = right.cross(forward).normalize_or_zero();
+                if self.input.w { self.orbit.target += forward * step; }
+                if self.input.s { self.orbit.target -= forward * step; }
+                if self.input.d { self.orbit.target += right   * step; }
+                if self.input.a { self.orbit.target -= right   * step; }
+                if self.input.e { self.orbit.target += up      * step; }
+                if self.input.q { self.orbit.target -= up      * step; }
                 let window_clone = window.clone();
                 self.frame(&window_clone);
                 window_clone.request_redraw();
@@ -598,7 +663,7 @@ impl TabViewer for DockedTabs<'_> {
                     self.state.target.x, self.state.target.y, self.state.target.z
                 ));
                 ui.separator();
-                ui.small("LMB drag: orbit · scroll: zoom · ESC: quit");
+                ui.small("LMB orbit · RMB pan · WASD / QE fly · scroll zoom · ESC quit");
             }
         }
     }
