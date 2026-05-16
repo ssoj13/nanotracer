@@ -126,9 +126,14 @@ pub fn run_with_training(scene: Scene, cfg: TrainConfig) -> Result<(), Box<dyn s
         last_seen_version: 0,
         paused,
     });
-    // Augment the dock layout with a Training tab.
-    let surface = app.dock.main_surface_mut();
-    surface.split_below(NodeIndex::root().right(), 0.5, vec![Tab::Training]);
+    // Augment the dock layout with a Training tab — unless the
+    // restored layout already carries one from a previous training
+    // session (avoids duplicate tabs when relaunching a `--view-training`
+    // run after a clean exit).
+    if !dock_has_tab(&app.dock, Tab::Training) {
+        let surface = app.dock.main_surface_mut();
+        surface.split_below(NodeIndex::root().right(), 0.5, vec![Tab::Training]);
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -178,11 +183,60 @@ struct InputState {
     e: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Tab {
     Viewport,
     Inspector,
     Training,
+}
+
+/// Where the dock layout is persisted between viewer sessions. Lives
+/// under `.omc/state/` to ride along with the project's other UI state
+/// (HUD caches, autopilot, etc.) — matches the existing convention
+/// rather than scattering yet another XDG/AppData path.
+fn dock_layout_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(".omc/state/viewer-dock.ron")
+}
+
+/// Best-effort load of a previously saved dock layout. Returns `None`
+/// on any failure (missing file, parse error, schema drift after a Tab
+/// enum change) so the viewer falls back to the default layout instead
+/// of refusing to open.
+fn load_dock_layout() -> Option<DockState<Tab>> {
+    let path = dock_layout_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    match ron::from_str::<DockState<Tab>>(&text) {
+        Ok(state) => Some(state),
+        Err(e) => {
+            eprintln!("[viewer] ignoring saved dock layout at {path:?}: {e}");
+            None
+        }
+    }
+}
+
+/// Best-effort save of the current dock layout. Failures are logged
+/// but do not block window close — the layout is an ergonomic nicety,
+/// not load-bearing state.
+fn save_dock_layout(dock: &DockState<Tab>) {
+    let path = dock_layout_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match ron::ser::to_string_pretty(dock, ron::ser::PrettyConfig::default()) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&path, text) {
+                eprintln!("[viewer] failed to persist dock layout to {path:?}: {e}");
+            }
+        }
+        Err(e) => eprintln!("[viewer] failed to serialise dock layout: {e}"),
+    }
+}
+
+/// Walk every surface + node looking for `tab`. Used after loading a
+/// saved layout to decide whether `run_with_training` still needs to
+/// append a `Training` tab (otherwise the same tab would appear twice).
+fn dock_has_tab(dock: &DockState<Tab>, tab: Tab) -> bool {
+    dock.iter_all_tabs().any(|(_, t)| *t == tab)
 }
 
 /// Per-frame UI state shared between the dock tabs.
@@ -227,9 +281,16 @@ impl ViewerApp {
     fn new(splats: SplatBuffer) -> Self {
         let (centroid, extent) = scene_centroid_extent(&splats);
         let distance = (extent.max_element() * 1.5).max(2.0);
-        let mut dock = DockState::new(vec![Tab::Viewport]);
-        let surface = dock.main_surface_mut();
-        surface.split_right(NodeIndex::root(), 0.78, vec![Tab::Inspector]);
+        // Restore the dock layout from the previous session when
+        // available; otherwise fall back to the canonical 78/22
+        // Viewport+Inspector split. A `Training` tab is appended later
+        // by `run_with_training` if needed (and not already present).
+        let dock = load_dock_layout().unwrap_or_else(|| {
+            let mut d = DockState::new(vec![Tab::Viewport]);
+            d.main_surface_mut()
+                .split_right(NodeIndex::root(), 0.78, vec![Tab::Inspector]);
+            d
+        });
         Self {
             splats: Some(splats),
             window: None,
@@ -288,7 +349,10 @@ impl ApplicationHandler for ViewerApp {
         let captured_pointer = state.egui_ctx.is_pointer_over_egui();
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                save_dock_layout(&self.dock);
+                event_loop.exit();
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {

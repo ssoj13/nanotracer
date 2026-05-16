@@ -23,5 +23,7 @@ pollster      = { workspace = true }
 egui       = "0.34"
 egui-wgpu  = { version = "0.34", default-features = false, features = ["winit"] }
 egui-winit = { version = "0.34", default-features = false }
-egui_dock  = "0.19"
+egui_dock  = { version = "0.19", features = ["serde"] }
 egui_plot  = "0.35"
+serde      = { version = "1", features = ["derive"] }
+ron        = "0.8"

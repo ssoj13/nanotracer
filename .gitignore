@@ -17,3 +17,7 @@ cdx*.cmd
 *.ply
 *.png
 
+# Per-user viewer UI state — restored across sessions but not shared
+# across machines or contributors.
+.omc/state/viewer-dock.ron
+
