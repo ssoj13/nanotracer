@@ -22,6 +22,7 @@
 
 use glam::Vec3;
 
+use crate::adam::AdamState;
 use crate::gpu::WgpuCtx;
 use crate::splat_store::SplatBuffer;
 
@@ -93,20 +94,11 @@ impl GpuSplatBuffer {
     pub fn upload(ctx: &WgpuCtx, src: &SplatBuffer) -> Self {
         let n = src.len();
 
-        let positions: Vec<[f32; 4]> =
-            src.positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
+        let positions: Vec<[f32; 4]> = src.positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
         let rotations: Vec<[f32; 4]> = src.rotations.clone();
-        let scales: Vec<[f32; 4]> = src
-            .scales
-            .iter()
-            .map(|s| [s[0], s[1], s[2], 0.0])
-            .collect();
+        let scales: Vec<[f32; 4]> = src.scales.iter().map(|s| [s[0], s[1], s[2], 0.0]).collect();
         let opacities: Vec<f32> = src.opacities.clone();
-        let sh_dc: Vec<[f32; 4]> = src
-            .sh_dc
-            .iter()
-            .map(|c| [c[0], c[1], c[2], 0.0])
-            .collect();
+        let sh_dc: Vec<[f32; 4]> = src.sh_dc.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
 
         // 45 → 48 floats per splat, three trailing zero pads.
         let mut sh_rest: Vec<f32> = Vec::with_capacity(n * SH_REST_PADDED);
@@ -135,18 +127,9 @@ impl GpuSplatBuffer {
         let n = self.n as usize;
         debug_assert_eq!(src.len(), n);
 
-        let positions: Vec<[f32; 4]> =
-            src.positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
-        let scales: Vec<[f32; 4]> = src
-            .scales
-            .iter()
-            .map(|s| [s[0], s[1], s[2], 0.0])
-            .collect();
-        let sh_dc: Vec<[f32; 4]> = src
-            .sh_dc
-            .iter()
-            .map(|c| [c[0], c[1], c[2], 0.0])
-            .collect();
+        let positions: Vec<[f32; 4]> = src.positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
+        let scales: Vec<[f32; 4]> = src.scales.iter().map(|s| [s[0], s[1], s[2], 0.0]).collect();
+        let sh_dc: Vec<[f32; 4]> = src.sh_dc.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
         let mut sh_rest: Vec<f32> = Vec::with_capacity(n * SH_REST_PADDED);
         for i in 0..n {
             let base = i * 45;
@@ -154,12 +137,18 @@ impl GpuSplatBuffer {
             sh_rest.extend_from_slice(&[0.0; 3]);
         }
 
-        ctx.queue.write_buffer(&self.positions, 0, bytemuck::cast_slice(&positions));
-        ctx.queue.write_buffer(&self.rotations, 0, bytemuck::cast_slice(&src.rotations));
-        ctx.queue.write_buffer(&self.scales, 0, bytemuck::cast_slice(&scales));
-        ctx.queue.write_buffer(&self.opacities, 0, bytemuck::cast_slice(&src.opacities));
-        ctx.queue.write_buffer(&self.sh_dc, 0, bytemuck::cast_slice(&sh_dc));
-        ctx.queue.write_buffer(&self.sh_rest, 0, bytemuck::cast_slice(&sh_rest));
+        ctx.queue
+            .write_buffer(&self.positions, 0, bytemuck::cast_slice(&positions));
+        ctx.queue
+            .write_buffer(&self.rotations, 0, bytemuck::cast_slice(&src.rotations));
+        ctx.queue
+            .write_buffer(&self.scales, 0, bytemuck::cast_slice(&scales));
+        ctx.queue
+            .write_buffer(&self.opacities, 0, bytemuck::cast_slice(&src.opacities));
+        ctx.queue
+            .write_buffer(&self.sh_dc, 0, bytemuck::cast_slice(&sh_dc));
+        ctx.queue
+            .write_buffer(&self.sh_rest, 0, bytemuck::cast_slice(&sh_rest));
     }
 
     /// Read back to a CPU [`SplatBuffer`]. Strips the `vec4` padding so
@@ -195,6 +184,242 @@ impl GpuSplatBuffer {
             sh_rest,
         }
     }
+}
+
+/// GPU-resident Adam first/second moment buffers — same vec4-padded
+/// layout as [`GradSplatBuffers`] so a single generic Adam kernel can
+/// step every attribute. Padding lanes carry zero gradients and stay
+/// at zero throughout training; the kernel writes `0 - lr * 0 = 0`
+/// into them which is harmless.
+///
+/// Sizes per splat (matches `GpuSplatBuffer` exactly):
+///   * `m_pos`,  `v_pos`   : `n × 16 B` (vec4 padded)
+///   * `m_rot`,  `v_rot`   : `n × 16 B` (vec4)
+///   * `m_scale`,`v_scale` : `n × 16 B` (vec4 padded)
+///   * `m_op`,   `v_op`    : `n × 4  B` (f32 scalar)
+///   * `m_dc`,   `v_dc`    : `n × 16 B` (vec4 padded)
+///   * `m_rest`, `v_rest`  : `n × 192 B` (12 vec4, 45 active + 3 pad)
+pub struct AdamMomentBuffers {
+    pub n: u32,
+    pub m_pos: wgpu::Buffer,
+    pub v_pos: wgpu::Buffer,
+    pub m_rot: wgpu::Buffer,
+    pub v_rot: wgpu::Buffer,
+    pub m_scale: wgpu::Buffer,
+    pub v_scale: wgpu::Buffer,
+    pub m_op: wgpu::Buffer,
+    pub v_op: wgpu::Buffer,
+    pub m_dc: wgpu::Buffer,
+    pub v_dc: wgpu::Buffer,
+    pub m_rest: wgpu::Buffer,
+    pub v_rest: wgpu::Buffer,
+}
+
+impl AdamMomentBuffers {
+    /// Allocate zeroed moment buffers for `n` splats.
+    pub fn new(ctx: &WgpuCtx, n: u32) -> Self {
+        let n_u = n.max(1) as u64;
+        let vec4 = n_u * 16;
+        let scalar = n_u * 4;
+        let rest = n_u * (SH_REST_PADDED as u64) * 4;
+        Self {
+            n,
+            m_pos: ctx.storage_buffer_zeroed("adam-m-pos", vec4),
+            v_pos: ctx.storage_buffer_zeroed("adam-v-pos", vec4),
+            m_rot: ctx.storage_buffer_zeroed("adam-m-rot", vec4),
+            v_rot: ctx.storage_buffer_zeroed("adam-v-rot", vec4),
+            m_scale: ctx.storage_buffer_zeroed("adam-m-scale", vec4),
+            v_scale: ctx.storage_buffer_zeroed("adam-v-scale", vec4),
+            m_op: ctx.storage_buffer_zeroed("adam-m-op", scalar),
+            v_op: ctx.storage_buffer_zeroed("adam-v-op", scalar),
+            m_dc: ctx.storage_buffer_zeroed("adam-m-dc", vec4),
+            v_dc: ctx.storage_buffer_zeroed("adam-v-dc", vec4),
+            m_rest: ctx.storage_buffer_zeroed("adam-m-rest", rest),
+            v_rest: ctx.storage_buffer_zeroed("adam-v-rest", rest),
+        }
+    }
+
+    /// Upload moments from CPU `AdamState` mirrors (flat unpadded
+    /// layout: pos `3·n`, rot `4·n`, scale `3·n`, op `n`, dc `3·n`,
+    /// rest `45·n`). Used after densify/prune mutates the CPU state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_from_cpu(
+        ctx: &WgpuCtx,
+        adam_pos: &AdamState,
+        adam_rot: &AdamState,
+        adam_scale: &AdamState,
+        adam_op: &AdamState,
+        adam_dc: &AdamState,
+        adam_rest: &AdamState,
+    ) -> Self {
+        let n = adam_op.m.len() as u32;
+        let me = Self::new(ctx, n);
+        me.write_pos(ctx, &adam_pos.m, &adam_pos.v);
+        me.write_rot(ctx, &adam_rot.m, &adam_rot.v);
+        me.write_scale(ctx, &adam_scale.m, &adam_scale.v);
+        me.write_op(ctx, &adam_op.m, &adam_op.v);
+        me.write_dc(ctx, &adam_dc.m, &adam_dc.v);
+        me.write_rest(ctx, &adam_rest.m, &adam_rest.v);
+        me
+    }
+
+    /// Re-pad a `3·n` flat slab into the vec4-padded GPU shape and
+    /// upload it to `m_pos`/`v_pos`.
+    pub fn write_pos(&self, ctx: &WgpuCtx, m: &[f32], v: &[f32]) {
+        let n = self.n as usize;
+        debug_assert_eq!(m.len(), n * 3);
+        debug_assert_eq!(v.len(), n * 3);
+        let m_p = pad3_to_vec4(m, n);
+        let v_p = pad3_to_vec4(v, n);
+        ctx.queue
+            .write_buffer(&self.m_pos, 0, bytemuck::cast_slice(&m_p));
+        ctx.queue
+            .write_buffer(&self.v_pos, 0, bytemuck::cast_slice(&v_p));
+    }
+
+    pub fn write_rot(&self, ctx: &WgpuCtx, m: &[f32], v: &[f32]) {
+        let n = self.n as usize;
+        debug_assert_eq!(m.len(), n * 4);
+        debug_assert_eq!(v.len(), n * 4);
+        ctx.queue
+            .write_buffer(&self.m_rot, 0, bytemuck::cast_slice(m));
+        ctx.queue
+            .write_buffer(&self.v_rot, 0, bytemuck::cast_slice(v));
+    }
+
+    pub fn write_scale(&self, ctx: &WgpuCtx, m: &[f32], v: &[f32]) {
+        let n = self.n as usize;
+        debug_assert_eq!(m.len(), n * 3);
+        debug_assert_eq!(v.len(), n * 3);
+        let m_p = pad3_to_vec4(m, n);
+        let v_p = pad3_to_vec4(v, n);
+        ctx.queue
+            .write_buffer(&self.m_scale, 0, bytemuck::cast_slice(&m_p));
+        ctx.queue
+            .write_buffer(&self.v_scale, 0, bytemuck::cast_slice(&v_p));
+    }
+
+    pub fn write_op(&self, ctx: &WgpuCtx, m: &[f32], v: &[f32]) {
+        let n = self.n as usize;
+        debug_assert_eq!(m.len(), n);
+        debug_assert_eq!(v.len(), n);
+        ctx.queue
+            .write_buffer(&self.m_op, 0, bytemuck::cast_slice(m));
+        ctx.queue
+            .write_buffer(&self.v_op, 0, bytemuck::cast_slice(v));
+    }
+
+    pub fn write_dc(&self, ctx: &WgpuCtx, m: &[f32], v: &[f32]) {
+        let n = self.n as usize;
+        debug_assert_eq!(m.len(), n * 3);
+        debug_assert_eq!(v.len(), n * 3);
+        let m_p = pad3_to_vec4(m, n);
+        let v_p = pad3_to_vec4(v, n);
+        ctx.queue
+            .write_buffer(&self.m_dc, 0, bytemuck::cast_slice(&m_p));
+        ctx.queue
+            .write_buffer(&self.v_dc, 0, bytemuck::cast_slice(&v_p));
+    }
+
+    /// sh_rest mirror is `45·n` floats; pad to `48·n` (3 trailing
+    /// zeros per splat) before upload.
+    pub fn write_rest(&self, ctx: &WgpuCtx, m: &[f32], v: &[f32]) {
+        let n = self.n as usize;
+        debug_assert_eq!(m.len(), n * 45);
+        debug_assert_eq!(v.len(), n * 45);
+        let m_p = pad45_to_48(m, n);
+        let v_p = pad45_to_48(v, n);
+        ctx.queue
+            .write_buffer(&self.m_rest, 0, bytemuck::cast_slice(&m_p));
+        ctx.queue
+            .write_buffer(&self.v_rest, 0, bytemuck::cast_slice(&v_p));
+    }
+
+    /// Read all 12 moment buffers and unpad into the CPU `AdamState`
+    /// mirrors in-place. Used right before densify/prune mutates the
+    /// CPU state — preserves per-splat history for survivors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn download_to_cpu(
+        &self,
+        ctx: &WgpuCtx,
+        adam_pos: &mut AdamState,
+        adam_rot: &mut AdamState,
+        adam_scale: &mut AdamState,
+        adam_op: &mut AdamState,
+        adam_dc: &mut AdamState,
+        adam_rest: &mut AdamState,
+    ) {
+        let n = self.n as usize;
+
+        let m_pos: Vec<[f32; 4]> = ctx.readback(&self.m_pos, n);
+        let v_pos: Vec<[f32; 4]> = ctx.readback(&self.v_pos, n);
+        adam_pos.m = unpad_vec4_to_3(&m_pos);
+        adam_pos.v = unpad_vec4_to_3(&v_pos);
+
+        let m_rot: Vec<f32> = ctx.readback(&self.m_rot, n * 4);
+        let v_rot: Vec<f32> = ctx.readback(&self.v_rot, n * 4);
+        adam_rot.m = m_rot;
+        adam_rot.v = v_rot;
+
+        let m_scale: Vec<[f32; 4]> = ctx.readback(&self.m_scale, n);
+        let v_scale: Vec<[f32; 4]> = ctx.readback(&self.v_scale, n);
+        adam_scale.m = unpad_vec4_to_3(&m_scale);
+        adam_scale.v = unpad_vec4_to_3(&v_scale);
+
+        let m_op: Vec<f32> = ctx.readback(&self.m_op, n);
+        let v_op: Vec<f32> = ctx.readback(&self.v_op, n);
+        adam_op.m = m_op;
+        adam_op.v = v_op;
+
+        let m_dc: Vec<[f32; 4]> = ctx.readback(&self.m_dc, n);
+        let v_dc: Vec<[f32; 4]> = ctx.readback(&self.v_dc, n);
+        adam_dc.m = unpad_vec4_to_3(&m_dc);
+        adam_dc.v = unpad_vec4_to_3(&v_dc);
+
+        let m_rest: Vec<f32> = ctx.readback(&self.m_rest, n * SH_REST_PADDED);
+        let v_rest: Vec<f32> = ctx.readback(&self.v_rest, n * SH_REST_PADDED);
+        adam_rest.m = unpad_48_to_45(&m_rest, n);
+        adam_rest.v = unpad_48_to_45(&v_rest, n);
+    }
+}
+
+fn pad3_to_vec4(src: &[f32], n: usize) -> Vec<[f32; 4]> {
+    debug_assert_eq!(src.len(), n * 3);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push([src[i * 3], src[i * 3 + 1], src[i * 3 + 2], 0.0]);
+    }
+    out
+}
+
+fn pad45_to_48(src: &[f32], n: usize) -> Vec<f32> {
+    debug_assert_eq!(src.len(), n * 45);
+    let mut out = Vec::with_capacity(n * SH_REST_PADDED);
+    for i in 0..n {
+        let base = i * 45;
+        out.extend_from_slice(&src[base..base + 45]);
+        out.extend_from_slice(&[0.0; 3]);
+    }
+    out
+}
+
+fn unpad_vec4_to_3(padded: &[[f32; 4]]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(padded.len() * 3);
+    for p in padded {
+        out.push(p[0]);
+        out.push(p[1]);
+        out.push(p[2]);
+    }
+    out
+}
+
+fn unpad_48_to_45(padded: &[f32], n: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(n * 45);
+    for i in 0..n {
+        let base = i * SH_REST_PADDED;
+        out.extend_from_slice(&padded[base..base + 45]);
+    }
+    out
 }
 
 #[cfg(test)]

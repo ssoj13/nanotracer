@@ -19,24 +19,26 @@
 //! densify-and-prune land in subsequent phases.
 
 pub mod adam;
+pub mod adam_gpu;
 pub mod gpu;
 pub mod prefix_scan;
 pub mod radix_sort;
 pub mod raster;
-pub mod tile_binner;
 pub mod reference;
 pub mod splat_gpu;
 pub mod splat_store;
+pub mod tile_binner;
 pub mod train;
 
 pub use adam::AdamState;
+pub use adam_gpu::AdamGpu;
 pub use gpu::WgpuCtx;
 pub use prefix_scan::PrefixScan;
 pub use radix_sort::RadixSort;
 pub use raster::{CameraUniform, ProjectedGrad, ProjectedSplat, Rasterizer};
-pub use splat_gpu::GradSplatBuffers;
-pub use tile_binner::{TileBinner, TileBinningResult, TilingParams};
 pub use reference::{ReferenceView, bake_references};
 pub use splat_gpu::GpuSplatBuffer;
+pub use splat_gpu::{AdamMomentBuffers, GradSplatBuffers};
 pub use splat_store::SplatBuffer;
+pub use tile_binner::{TileBinner, TileBinningResult, TilingParams};
 pub use train::{TrainConfig, train};
