@@ -18,7 +18,7 @@
     "runtime": null
   },
   "build": {
-    "buildCommand": "cargo build -p nano-optimize 2>&1 | tail -10",
+    "buildCommand": "cargo build --workspace 2>&1 | tail -5",
     "testCommand": "cargo test --workspace 2>&1 | grep -E \"^test result\" | head -15",
     "lintCommand": "cargo clippy",
     "devCommand": "cargo run",
@@ -76,8 +76,14 @@
     },
     {
       "path": "src\\main.rs",
-      "accessCount": 25,
-      "lastAccessed": 1778887457965,
+      "accessCount": 32,
+      "lastAccessed": 1778898440775,
+      "type": "file"
+    },
+    {
+      "path": "todo.md",
+      "accessCount": 20,
+      "lastAccessed": 1778898501623,
       "type": "file"
     },
     {
@@ -87,9 +93,9 @@
       "type": "file"
     },
     {
-      "path": "todo.md",
-      "accessCount": 15,
-      "lastAccessed": 1778892530144,
+      "path": "Cargo.toml",
+      "accessCount": 13,
+      "lastAccessed": 1778893667802,
       "type": "file"
     },
     {
@@ -117,21 +123,15 @@
       "type": "file"
     },
     {
+      "path": "README.md",
+      "accessCount": 8,
+      "lastAccessed": 1778898840315,
+      "type": "file"
+    },
+    {
       "path": "crates\\nano-gpu\\src\\vk_runtime.rs",
       "accessCount": 7,
       "lastAccessed": 1778868196174,
-      "type": "file"
-    },
-    {
-      "path": "Cargo.toml",
-      "accessCount": 7,
-      "lastAccessed": 1778886444877,
-      "type": "file"
-    },
-    {
-      "path": "README.md",
-      "accessCount": 6,
-      "lastAccessed": 1778876181292,
       "type": "file"
     },
     {
@@ -144,6 +144,24 @@
       "path": "crates\\nano-core\\src\\environment.rs",
       "accessCount": 5,
       "lastAccessed": 1778876115729,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-splat\\src\\ply.rs",
+      "accessCount": 4,
+      "lastAccessed": 1778897852351,
+      "type": "file"
+    },
+    {
+      "path": "AGENTS.md",
+      "accessCount": 4,
+      "lastAccessed": 1778899390938,
+      "type": "file"
+    },
+    {
+      "path": "DIAGRAMS.md",
+      "accessCount": 4,
+      "lastAccessed": 1778899431265,
       "type": "file"
     },
     {
@@ -192,18 +210,6 @@
       "path": "crates\\nano-io\\src\\gltf_loader.rs",
       "accessCount": 2,
       "lastAccessed": 1778866185153,
-      "type": "file"
-    },
-    {
-      "path": "AGENTS.md",
-      "accessCount": 2,
-      "lastAccessed": 1778873303467,
-      "type": "file"
-    },
-    {
-      "path": "DIAGRAMS.md",
-      "accessCount": 2,
-      "lastAccessed": 1778873336573,
       "type": "file"
     },
     {
@@ -360,12 +366,6 @@
       "path": "crates\\nano-io\\src\\lib.rs",
       "accessCount": 1,
       "lastAccessed": 1778866193028,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-splat\\src\\ply.rs",
-      "accessCount": 1,
-      "lastAccessed": 1778866325628,
       "type": "file"
     }
   ],
