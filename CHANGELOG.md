@@ -180,18 +180,52 @@ forward + analytic backward.
 - CLI: `nanotracer-rs --splats out.ply --view` (works with `--train`
   too) opens the viewer after generating / training the splats.
 
+### Added — Bx.1 / Bx.2 / Bx.3 / Bx.4 — egui_dock viewer extensions
+
+- **Bx.1 — egui_dock + GPU-only tonemap.** Viewer presentation
+  rewritten on top of the `egui 0.34 / egui-wgpu 0.34 / egui-winit
+  0.34 / egui_dock 0.19 / egui_plot 0.35` stack. New `tonemap.wgsl`
+  compute kernel does Reinhard + sRGB encode straight into an
+  `rgba8unorm` storage texture; egui samples it as a native texture
+  in the `Viewport` dock tab. CPU readback path retired — the splat
+  image stays on the GPU all the way to the swapchain. Inspector
+  dock tab shows FPS, splat count, camera pose, FoV slider.
+  Viewport tab rounds its requested size to multiples of the 16-pixel
+  tile and the host reallocates render targets to match.
+- **Bx.2 — PLY loader.** `nano_splat::read_ply(path)` parses the
+  Inria binary-little-endian schema with a tolerant property-name
+  mapping (handles minor reordering, missing optional `nx/ny/nz`,
+  errors loudly on missing required fields). New
+  `nanotracer-rs --view-ply scene.ply` fast path bypasses scene
+  generation entirely. Round-trip test pins write_ply → read_ply
+  bit-equal.
+- **Bx.3 — Full camera controls.** Beyond LMB-orbit + scroll-zoom:
+  RMB-drag pans the target in the camera's screen plane (magnitude
+  scales with distance), WASD/QE fly mode moves the target along
+  the camera frame (forward/right/up). Pointer-capture aware — egui
+  consumes input first so dragging widgets doesn't move the camera.
+- **Bx.4 — Live training preview.** `nano_view::run_with_training(
+  scene, cfg)` spawns a worker thread that runs the full `train()`
+  loop while the viewer event loop runs on the main thread; an
+  `Arc<RwLock<Option<TrainSnapshot>>>` shuttles per-iteration
+  splats + stats from worker to viewer. Per frame the viewer compares
+  the snapshot's monotonic version, copies the new `SplatBuffer`
+  into its GPU buffer (full realloc on densify count changes,
+  `sync_from` otherwise), and pushes the new MSE into a history
+  vec. New `Training` dock tab shows iter / MSE / splat-count plus
+  an `egui_plot::Line` of the loss curve.
+
+  `train()` signature gained an `on_iter: FnMut(u32, &SplatBuffer, f32)`
+  callback parameter — headless callers pass a no-op closure. CLI
+  flag `--view-training` opens the viewer with live preview; ESC
+  closes the window and detaches the worker (which finishes the
+  remaining iterations on its own).
+
 ### Tracked / Parked
 
 - **A4-ext** — `0.2·L1 + 0.8·DSSIM` perceptual loss (5-pass Gaussian
   blur kernel + analytic backward). Quality knob, not a correctness
-  gate.
-- **B1.x** — PLY-on-disk loader, RMB-pan, WASD fly-mode, FoV slider,
-  FPS / frame-time / splat-count HUD overlay.
-- **B2** — Training-time live preview. Two architectural options
-  spelled out in `todo.md`: threaded (`Arc<RwLock<SplatBuffer>>`
-  shared between worker and viewer) or pump-events
-  (`EventLoop::pump_app_events` interleaving one training iteration
-  per event cycle). Threaded is cleaner long-term.
+  gate; MSE alone converges.
 
 ### Infrastructure
 
