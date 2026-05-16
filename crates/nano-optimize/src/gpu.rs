@@ -50,11 +50,17 @@ impl WgpuCtx {
             "[nano-optimize] wgpu adapter: {} ({:?}, {:?})",
             info.name, info.backend, info.device_type
         );
+        // Request the adapter's maximum supported limits. Default
+        // wgpu limits cap storage buffers per shader stage at 8, which
+        // the `project_backward` kernel exceeds (it binds 7 forward
+        // input SSBOs + 6 gradient output SSBOs + 1 uniform = 14
+        // bindings). Discrete GPUs easily support hundreds.
+        let max_limits = adapter.limits();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("nano-optimize device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: max_limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 trace: wgpu::Trace::Off,

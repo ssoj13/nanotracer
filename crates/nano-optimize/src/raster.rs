@@ -118,6 +118,8 @@ pub struct Rasterizer {
     composite_bgl: wgpu::BindGroupLayout,
     composite_backward_pipeline: wgpu::ComputePipeline,
     composite_backward_bgl: wgpu::BindGroupLayout,
+    project_backward_pipeline: wgpu::ComputePipeline,
+    project_backward_bgl: wgpu::BindGroupLayout,
 }
 
 impl Rasterizer {
@@ -288,6 +290,48 @@ impl Rasterizer {
                     cache: None,
                 });
 
+        // Project-backward pipeline ------------------------------------
+        let project_backward_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("project_backward"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/project_backward.wgsl").into(),
+                ),
+            });
+        // 14 bindings: camera + 6 forward inputs + 1 grad input + 6 grad outputs.
+        let pb_entries: [wgpu::BindGroupLayoutEntry; 14] = std::array::from_fn(|i| {
+            let ty = match i {
+                0 => uniform,
+                1..=7 => storage_ro,
+                _ => storage_rw,
+            };
+            bgl_entry(i as u32, ty)
+        });
+        let project_backward_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("project-bwd-bgl"),
+                entries: &pb_entries,
+            });
+        let project_backward_layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("project-bwd-pl"),
+                bind_group_layouts: &[Some(&project_backward_bgl)],
+                immediate_size: 0,
+            });
+        let project_backward_pipeline =
+            ctx.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("project-bwd-pipeline"),
+                    layout: Some(&project_backward_layout),
+                    module: &project_backward_module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
         Self {
             project_pipeline,
             project_bgl,
@@ -295,6 +339,8 @@ impl Rasterizer {
             composite_bgl,
             composite_backward_pipeline,
             composite_backward_bgl,
+            project_backward_pipeline,
+            project_backward_bgl,
         }
     }
 
@@ -378,6 +424,57 @@ impl Rasterizer {
         let bytes = (n as usize).max(1) * std::mem::size_of::<ProjectedGrad>();
         let zeros = vec![0u8; bytes];
         ctx.queue.write_buffer(buf, 0, &zeros);
+    }
+
+    /// Per-splat backward of the projection pass. Reads
+    /// `projected_grad` (filled by `composite_backward`) and chains the
+    /// 2D-state gradients back into the 3D splat parameter gradients,
+    /// writing into the matching slots of `grads`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_backward(
+        &self,
+        ctx: &WgpuCtx,
+        splats: &GpuSplatBuffer,
+        projected_grad: &wgpu::Buffer,
+        camera: &CameraUniform,
+        grads: &crate::splat_gpu::GradSplatBuffers,
+    ) {
+        let camera_buf = ctx.uniform_buffer("project-bwd-cam", camera);
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("project-bwd-bg"),
+            layout: &self.project_backward_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0,  resource: camera_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1,  resource: splats.positions.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2,  resource: splats.rotations.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3,  resource: splats.scales.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4,  resource: splats.opacities.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5,  resource: splats.sh_dc.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6,  resource: splats.sh_rest.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7,  resource: projected_grad.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8,  resource: grads.d_positions.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9,  resource: grads.d_rotations.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: grads.d_scales.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: grads.d_opacities.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 12, resource: grads.d_sh_dc.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 13, resource: grads.d_sh_rest.as_entire_binding() },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("project-bwd-enc"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("project-bwd-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.project_backward_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(camera.n_splats.div_ceil(64).max(1), 1, 1);
+        }
+        ctx.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Reverse α-blend: given the forward output, a per-pixel dL/dC
