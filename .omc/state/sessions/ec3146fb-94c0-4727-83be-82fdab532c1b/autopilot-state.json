@@ -1,0 +1,10 @@
+{
+  "active": true,
+  "started_at": "2026-05-16T00:01:00.396Z",
+  "original_prompt": "контекст не твоя забота, запускай /autopilot",
+  "session_id": "ec3146fb-94c0-4727-83be-82fdab532c1b",
+  "project_path": "C:\\projects\\projects.rust.cg\\nanotracer-rs",
+  "reinforcement_count": 0,
+  "awaiting_confirmation_set_at": "2026-05-16T00:01:00.396Z",
+  "last_checked_at": "2026-05-16T00:01:00.396Z"
+}

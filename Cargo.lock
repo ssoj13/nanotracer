@@ -1144,6 +1144,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "nano-core",
+ "nano-io",
  "nano-render",
  "nano-splat",
  "pollster",

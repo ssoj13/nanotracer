@@ -18,8 +18,8 @@
     "runtime": null
   },
   "build": {
-    "buildCommand": "cargo build",
-    "testCommand": "cargo test",
+    "buildCommand": "cargo build -p nano-optimize 2>&1 | tail -10",
+    "testCommand": "cargo test --workspace 2>&1 | grep -E \"^test result\" | head -15",
     "lintCommand": "cargo clippy",
     "devCommand": "cargo run",
     "scripts": {}
@@ -70,8 +70,20 @@
   "hotPaths": [
     {
       "path": "crates\\nano-render\\src\\renderer.rs",
-      "accessCount": 20,
-      "lastAccessed": 1778875988569,
+      "accessCount": 46,
+      "lastAccessed": 1778887375734,
+      "type": "file"
+    },
+    {
+      "path": "src\\main.rs",
+      "accessCount": 25,
+      "lastAccessed": 1778887457965,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-gpu\\src\\gpu_scene.rs",
+      "accessCount": 17,
+      "lastAccessed": 1778887547900,
       "type": "file"
     },
     {
@@ -81,9 +93,21 @@
       "type": "directory"
     },
     {
-      "path": "src\\main.rs",
+      "path": "todo.md",
+      "accessCount": 10,
+      "lastAccessed": 1778887922694,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\src\\material.rs",
       "accessCount": 9,
-      "lastAccessed": 1778873990937,
+      "lastAccessed": 1778878983707,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-shaders\\src\\lib.rs",
+      "accessCount": 9,
+      "lastAccessed": 1778886901595,
       "type": "file"
     },
     {
@@ -99,9 +123,9 @@
       "type": "file"
     },
     {
-      "path": "crates\\nano-gpu\\src\\gpu_scene.rs",
+      "path": "Cargo.toml",
       "accessCount": 7,
-      "lastAccessed": 1778875460739,
+      "lastAccessed": 1778886444877,
       "type": "file"
     },
     {
@@ -111,27 +135,27 @@
       "type": "file"
     },
     {
+      "path": "crates\\nano-core\\src\\scene.rs",
+      "accessCount": 6,
+      "lastAccessed": 1778887521147,
+      "type": "file"
+    },
+    {
       "path": "crates\\nano-core\\src\\environment.rs",
       "accessCount": 5,
       "lastAccessed": 1778876115729,
       "type": "file"
     },
     {
-      "path": "todo.md",
-      "accessCount": 5,
-      "lastAccessed": 1778876164733,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-shaders\\src\\lib.rs",
-      "accessCount": 4,
-      "lastAccessed": 1778875913053,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-core\\src\\material.rs",
+      "path": "crates\\nano-core\\src\\lib.rs",
       "accessCount": 3,
-      "lastAccessed": 1778873877626,
+      "lastAccessed": 1778881792111,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-io\\src\\utils.rs",
+      "accessCount": 3,
+      "lastAccessed": 1778890752969,
       "type": "file"
     },
     {
@@ -153,12 +177,6 @@
       "type": "file"
     },
     {
-      "path": "Cargo.toml",
-      "accessCount": 2,
-      "lastAccessed": 1778865906565,
-      "type": "file"
-    },
-    {
       "path": "crates\\nano-core\\src\\geometry.rs",
       "accessCount": 2,
       "lastAccessed": 1778866110312,
@@ -171,27 +189,9 @@
       "type": "file"
     },
     {
-      "path": "crates\\nano-core\\src\\scene.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778866134334,
-      "type": "file"
-    },
-    {
       "path": "crates\\nano-io\\src\\gltf_loader.rs",
       "accessCount": 2,
       "lastAccessed": 1778866185153,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-io\\src\\utils.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778866189853,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-core\\src\\lib.rs",
-      "accessCount": 2,
-      "lastAccessed": 1778868336913,
       "type": "file"
     },
     {
@@ -210,6 +210,24 @@
       "path": "plan1.md",
       "accessCount": 2,
       "lastAccessed": 1778873358387,
+      "type": "file"
+    },
+    {
+      "path": "WGPU_RESEARCH.md",
+      "accessCount": 2,
+      "lastAccessed": 1778881785464,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-core\\Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1778886451570,
+      "type": "file"
+    },
+    {
+      "path": "crates\\nano-gpu\\src\\lib.rs",
+      "accessCount": 2,
+      "lastAccessed": 1778886451880,
       "type": "file"
     },
     {
@@ -309,18 +327,6 @@
       "type": "file"
     },
     {
-      "path": "WGPU_RESEARCH.md",
-      "accessCount": 1,
-      "lastAccessed": 1778865088964,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-core\\Cargo.toml",
-      "accessCount": 1,
-      "lastAccessed": 1778865915306,
-      "type": "file"
-    },
-    {
       "path": "crates\\nano-io\\Cargo.toml",
       "accessCount": 1,
       "lastAccessed": 1778865922369,
@@ -354,12 +360,6 @@
       "path": "crates\\nano-io\\src\\lib.rs",
       "accessCount": 1,
       "lastAccessed": 1778866193028,
-      "type": "file"
-    },
-    {
-      "path": "crates\\nano-gpu\\src\\lib.rs",
-      "accessCount": 1,
-      "lastAccessed": 1778866212429,
       "type": "file"
     },
     {

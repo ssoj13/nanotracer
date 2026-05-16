@@ -67,17 +67,19 @@ loss + densify still ahead.
       `--sphere-light`, `--box-light`, `--env-light` (replaces the old
       `--ibl-strength` knob — IBL intensity now flows through the
       explicit env-light).
-- [ ] **A2 Differentiable forward rasteriser** — tile-based α-blending
+- [x] **A2 Differentiable forward rasteriser** — tile-based α-blending
       front-to-back in WGSL compute, view/proj projection of splats,
-      forward pass producing predicted frames. Sub-steps:
-      - A2.1 — `project_gaussians.wgsl`: world → screen-space ellipse
-        (2D conic from 3D Σ projection), per-splat depth + radius.
-      - A2.2 — Tile binning: per-splat tile-bbox → duplicated splat
-        list, key = (tile_id, depth), radix-sort.
-      - A2.3 — `rasterize.wgsl`: per-tile workgroup α-blends its sorted
-        splat list front-to-back into `predicted: rgba16f`.
-      - A2.4 — Integration test: single analytic-Gaussian round-trip,
-        multi-splat reference parity against a CPU oracle.
+      forward pass producing predicted frames. Six sub-phases shipped:
+      - A2.0 — wgpu context + `GpuSplatBuffer` upload/readback roundtrip.
+      - A2.1 — `project_gaussians.wgsl`: 3D Σ → 2D conic, depth, radius,
+        full SH eval + CPU oracle for parity testing.
+      - A2.2 — GPU exclusive prefix-scan (three-level, up to 16M elts).
+      - A2.3 — Stable GPU radix sort (1-bit-at-a-time, 32 passes).
+      - A2.4 — Tile binning: count → scan → emit → sort → per-tile ranges.
+      - A2.5 — `rasterize.wgsl`: per-tile workgroup α-blends sorted
+        splats front-to-back into `vec4` framebuffer (xyz + coverage).
+      - A2.6 — End-to-end integration in `train()`: forward rasterise
+        per iteration, MSE vs reference, PNG dump on iter 0.
 - [ ] **A3 Backward pass** — gradients through α-blend back to per-splat
       (pos, rot, scale, opacity, sh). Validate with finite differences.
 - [ ] **A4 Loss** — L1 + SSIM photometric loss vs reference views, grad
