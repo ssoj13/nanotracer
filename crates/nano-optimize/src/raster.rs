@@ -38,6 +38,24 @@ pub struct ProjectedSplat {
 
 const _: () = assert!(core::mem::size_of::<ProjectedSplat>() == 48);
 
+/// Per-splat 2D-space gradient state filled by `rasterize_backward.wgsl`
+/// and consumed by `project_backward.wgsl`. 48 bytes (`3 × vec4`),
+/// std430-aligned. On the GPU the buffer is bound as
+/// `array<atomic<u32>>` so per-pixel contributions can accumulate via
+/// CAS-based `atomic_add_f32`; the u32 storage holds raw `f32` bits.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct ProjectedGrad {
+    /// .xy = dL/dmean (pixel-space), .z = dL/dopacity, .w = padding.
+    pub dmean_opacity: [f32; 4],
+    /// .xyz = dL/dconic (a, b, c), .w = padding.
+    pub dconic: [f32; 4],
+    /// .xyz = dL/dcolor (RGB), .w = padding.
+    pub dcolor: [f32; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<ProjectedGrad>() == 48);
+
 /// GPU-side mirror of the WGSL `Camera` struct. 96 bytes, std140 layout.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -98,6 +116,8 @@ pub struct Rasterizer {
     project_bgl: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::ComputePipeline,
     composite_bgl: wgpu::BindGroupLayout,
+    composite_backward_pipeline: wgpu::ComputePipeline,
+    composite_backward_bgl: wgpu::BindGroupLayout,
 }
 
 impl Rasterizer {
@@ -227,11 +247,54 @@ impl Rasterizer {
                     cache: None,
                 });
 
+        // Composite-backward (α-blend reverse) pipeline ---------------
+        let composite_backward_module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("rasterize_backward"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/rasterize_backward.wgsl").into(),
+                ),
+            });
+        let composite_backward_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("composite-bwd-bgl"),
+                entries: &[
+                    bgl_entry(0, storage_ro), // projected
+                    bgl_entry(1, storage_ro), // sorted_payloads
+                    bgl_entry(2, storage_ro), // tile_ranges
+                    bgl_entry(3, storage_ro), // forward_out
+                    bgl_entry(4, storage_ro), // dL_dC
+                    bgl_entry(5, storage_rw), // projected_grad (atomic)
+                    bgl_entry(6, uniform),    // params
+                ],
+            });
+        let composite_backward_layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("composite-bwd-pl"),
+                bind_group_layouts: &[Some(&composite_backward_bgl)],
+                immediate_size: 0,
+            });
+        let composite_backward_pipeline =
+            ctx.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("composite-bwd-pipeline"),
+                    layout: Some(&composite_backward_layout),
+                    module: &composite_backward_module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
         Self {
             project_pipeline,
             project_bgl,
             composite_pipeline,
             composite_bgl,
+            composite_backward_pipeline,
+            composite_backward_bgl,
         }
     }
 
@@ -298,6 +361,81 @@ impl Rasterizer {
     pub fn alloc_projected(&self, ctx: &WgpuCtx, n: u32) -> wgpu::Buffer {
         let bytes = (n as u64).max(1) * std::mem::size_of::<ProjectedSplat>() as u64;
         ctx.storage_buffer_zeroed("projected", bytes)
+    }
+
+    /// Allocate a zeroed `ProjectedGrad` buffer sized for `n` splats.
+    /// The backward rasteriser will use `atomic_add_f32` (CAS on
+    /// `u32` bitcasts) to accumulate contributions from multiple
+    /// pixels of multiple tiles into the same splat.
+    pub fn alloc_projected_grad(&self, ctx: &WgpuCtx, n: u32) -> wgpu::Buffer {
+        let bytes = (n as u64).max(1) * std::mem::size_of::<ProjectedGrad>() as u64;
+        ctx.storage_buffer_zeroed("projected-grad", bytes)
+    }
+
+    /// Reset a `ProjectedGrad` buffer to all zeros. Use between
+    /// training iterations instead of reallocating.
+    pub fn zero_projected_grad(&self, ctx: &WgpuCtx, buf: &wgpu::Buffer, n: u32) {
+        let bytes = (n as usize).max(1) * std::mem::size_of::<ProjectedGrad>();
+        let zeros = vec![0u8; bytes];
+        ctx.queue.write_buffer(buf, 0, &zeros);
+    }
+
+    /// Reverse α-blend: given the forward output, a per-pixel dL/dC
+    /// loss gradient, and the tile bins, accumulate per-splat 2D-space
+    /// gradients into `projected_grad`. Caller must zero `projected_grad`
+    /// beforehand and ensure `dL_dC` is sized `width × height` `vec4`s
+    /// (`xyz` carries the gradient; `w` is unused / padding).
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_backward(
+        &self,
+        ctx: &WgpuCtx,
+        projected: &wgpu::Buffer,
+        sorted_payloads: &wgpu::Buffer,
+        tile_ranges: &wgpu::Buffer,
+        forward_out: &wgpu::Buffer,
+        dl_dc: &wgpu::Buffer,
+        projected_grad: &wgpu::Buffer,
+        params: &TilingParams,
+    ) {
+        let tiles_x = params.tiles_x();
+        let tiles_y = params.tiles_y();
+        let comp_params = ctx.uniform_buffer(
+            "composite-bwd-params",
+            &CompositeParams {
+                width: params.width,
+                height: params.height,
+                tile_size: params.tile_size,
+                tiles_x,
+            },
+        );
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite-bwd-bg"),
+            layout: &self.composite_backward_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: projected.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: sorted_payloads.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tile_ranges.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: forward_out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: dl_dc.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: projected_grad.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: comp_params.as_entire_binding() },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("composite-bwd-enc"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("composite-bwd-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.composite_backward_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(tiles_x, tiles_y, 1);
+        }
+        ctx.queue.submit(std::iter::once(encoder.finish()));
     }
 
     // (composite() defined above)
@@ -633,6 +771,80 @@ mod tests {
             let p = fetch(32 + d, 32 + d);
             assert!(p[3] <= centre[3] + 1e-3, "diag falloff broken at +{d}: {p:?}");
         }
+    }
+
+    #[test]
+    fn backward_accumulates_per_splat_gradients() {
+        use crate::tile_binner::{TileBinner, TilingParams};
+
+        let ctx = match WgpuCtx::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: no GPU adapter ({e})");
+                return;
+            }
+        };
+        // Single opaque white splat centred on 32×32 image (2×2 tiles).
+        // Isotropic conic — covers ~half the image at σ = 5.
+        let splat = ProjectedSplat {
+            mean_xy: [16.0, 16.0],
+            depth: 5.0,
+            radius: 25.0,
+            conic: [0.04, 0.0, 0.04],
+            visible: 1.0,
+            color: [1.0, 1.0, 1.0],
+            opacity: 1.0,
+        };
+        let projected = ctx.storage_buffer("bwd-projected", &[splat]);
+        let params = TilingParams { width: 32, height: 32, tile_size: 16, depth_max: 100.0 };
+        let binner = TileBinner::new(&ctx);
+        let res = binner.bin(&ctx, &projected, 1, &params);
+
+        // Forward composite.
+        let raster = Rasterizer::new(&ctx);
+        let forward = raster.alloc_image(&ctx, 32, 32);
+        raster.composite(&ctx, &projected, &res.sorted_payloads, &res.tile_ranges, &forward, &params);
+
+        // Constant per-pixel loss gradient dL/dC = (1, 1, 1, 0). Makes
+        // the expected sign of dopacity and dconic.diag positive (any
+        // brighter splat → larger loss).
+        let dl_dc_vec: Vec<[f32; 4]> = vec![[1.0, 1.0, 1.0, 0.0]; 32 * 32];
+        let dl_dc = ctx.storage_buffer("dl-dc", &dl_dc_vec);
+
+        // Backward.
+        let proj_grad = raster.alloc_projected_grad(&ctx, 1);
+        raster.composite_backward(
+            &ctx, &projected, &res.sorted_payloads, &res.tile_ranges,
+            &forward, &dl_dc, &proj_grad, &params,
+        );
+
+        let grads: Vec<ProjectedGrad> = ctx.readback(&proj_grad, 1);
+        let g = &grads[0];
+        eprintln!("dmean_op = {:?} dconic = {:?} dcolor = {:?}", g.dmean_opacity, g.dconic, g.dcolor);
+
+        // Colour grad: every pixel contributes T_i · α_i · 1 → must be > 0.
+        assert!(g.dcolor[0] > 0.1, "dcolor.r too small: {}", g.dcolor[0]);
+        assert!(g.dcolor[1] > 0.1, "dcolor.g too small: {}", g.dcolor[1]);
+        assert!(g.dcolor[2] > 0.1, "dcolor.b too small: {}", g.dcolor[2]);
+
+        // Opacity grad (at dmean_opacity[2]): same sign as colour grad —
+        // raising σ raises α raises C ↑ raises loss.
+        assert!(g.dmean_opacity[2] > 0.01, "dopacity too small: {}", g.dmean_opacity[2]);
+
+        // Conic-diagonal grads (a, c) should be negative: raising a or c
+        // makes the Gaussian sharper / smaller-footprint → less area
+        // covered → less colour → LOWER loss. Sign flipped.
+        // But conic.x · dx² appears with a negative sign inside power
+        // (power = −½(a dx² + …)), and dpower/da = −½ dx². With dx ≠ 0,
+        // an increase in a *decreases* G → decreases α → decreases C.
+        // So dC/da < 0 → grad < 0 under positive dL/dC.
+        assert!(g.dconic[0] < -1e-4, "dconic.a should be negative: {}", g.dconic[0]);
+        assert!(g.dconic[2] < -1e-4, "dconic.c should be negative: {}", g.dconic[2]);
+
+        // 2D-mean gradient — splat is centred and the dL/dC field is
+        // perfectly symmetric, so the per-axis sum should net out near 0.
+        assert!(g.dmean_opacity[0].abs() < 0.5, "dmean.x not near 0: {}", g.dmean_opacity[0]);
+        assert!(g.dmean_opacity[1].abs() < 0.5, "dmean.y not near 0: {}", g.dmean_opacity[1]);
     }
 
     #[test]

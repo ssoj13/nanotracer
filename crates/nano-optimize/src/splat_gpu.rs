@@ -27,6 +27,53 @@ use crate::splat_store::SplatBuffer;
 
 const SH_REST_PADDED: usize = 48; // 45 active + 3 padding floats per splat
 
+/// Per-attribute gradient buffers. Same layout as [`GpuSplatBuffer`]
+/// (vec4-padded, planar SH rest) so the backward kernels can index
+/// in lockstep with the forward state. All buffers are f32; the
+/// backward kernel that writes them has exactly one thread per splat,
+/// so no atomics are required here.
+pub struct GradSplatBuffers {
+    pub n: u32,
+    pub d_positions: wgpu::Buffer,
+    pub d_rotations: wgpu::Buffer,
+    pub d_scales: wgpu::Buffer,
+    pub d_opacities: wgpu::Buffer,
+    pub d_sh_dc: wgpu::Buffer,
+    pub d_sh_rest: wgpu::Buffer,
+}
+
+impl GradSplatBuffers {
+    /// Allocate zeroed gradient buffers for `n` splats.
+    pub fn new(ctx: &crate::gpu::WgpuCtx, n: u32) -> Self {
+        let n_u = n.max(1) as u64;
+        Self {
+            n,
+            d_positions: ctx.storage_buffer_zeroed("grad-pos", n_u * 16),
+            d_rotations: ctx.storage_buffer_zeroed("grad-rot", n_u * 16),
+            d_scales: ctx.storage_buffer_zeroed("grad-scale", n_u * 16),
+            d_opacities: ctx.storage_buffer_zeroed("grad-op", n_u * 4),
+            d_sh_dc: ctx.storage_buffer_zeroed("grad-sh-dc", n_u * 16),
+            d_sh_rest: ctx.storage_buffer_zeroed("grad-sh-rest", n_u * (SH_REST_PADDED as u64) * 4),
+        }
+    }
+
+    /// Reset every gradient buffer to zero. Cheaper than reallocating
+    /// when the training loop runs the same `n` across iterations —
+    /// `queue.write_buffer` writes one zero block per buffer.
+    pub fn zero(&self, ctx: &crate::gpu::WgpuCtx) {
+        let n = self.n.max(1) as usize;
+        let zeros_vec4 = vec![0u8; n * 16];
+        let zeros_f32 = vec![0u8; n * 4];
+        let zeros_sh = vec![0u8; n * SH_REST_PADDED * 4];
+        ctx.queue.write_buffer(&self.d_positions, 0, &zeros_vec4);
+        ctx.queue.write_buffer(&self.d_rotations, 0, &zeros_vec4);
+        ctx.queue.write_buffer(&self.d_scales, 0, &zeros_vec4);
+        ctx.queue.write_buffer(&self.d_opacities, 0, &zeros_f32);
+        ctx.queue.write_buffer(&self.d_sh_dc, 0, &zeros_vec4);
+        ctx.queue.write_buffer(&self.d_sh_rest, 0, &zeros_sh);
+    }
+}
+
 /// GPU-side mirror of [`SplatBuffer`]. Buffers are sized for `n` splats
 /// at creation; densify (Phase A5) will reallocate by recreating the
 /// `GpuSplatBuffer` from the CPU side.
