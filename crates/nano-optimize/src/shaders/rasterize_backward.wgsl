@@ -149,6 +149,13 @@ fn main(
 
                     let one_minus_alpha = max(1.0 - alpha, ONE_MINUS_ALPHA_EPS);
                     T = T / one_minus_alpha;          // T was T_{i+1}, now T_i
+                    // Forward early-out at T < 1e-4: any splat earlier
+                    // than that point contributed nothing, and our T
+                    // reconstruction blows up because (1 − α) divisions
+                    // accumulate floating-point error. T > 1 signals
+                    // we've crossed into that "invisible" prefix —
+                    // bail for this pixel.
+                    if (T > 1.0001) { done = true; break; }
                     let contrib = T * alpha * color;  // = T_i α_i c_i
 
                     // Gradient wrt colour and α at this splat (per pixel).

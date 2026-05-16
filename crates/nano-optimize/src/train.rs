@@ -26,7 +26,7 @@ use crate::adam::{AdamConfig, AdamState};
 use crate::gpu::WgpuCtx;
 use crate::raster::{CameraUniform, Rasterizer};
 use crate::reference::{BakeConfig, bake_references};
-use crate::splat_gpu::GpuSplatBuffer;
+use crate::splat_gpu::{GpuSplatBuffer, GradSplatBuffers};
 use crate::splat_store::SplatBuffer;
 use crate::tile_binner::{TileBinner, TilingParams};
 
@@ -93,6 +93,13 @@ pub fn train(
         "projected",
         (gpu_splats.n as u64) * std::mem::size_of::<crate::raster::ProjectedSplat>() as u64,
     );
+    // Backward-pass scratch buffers (reused every iteration).
+    let projected_grad = rasterizer.alloc_projected_grad(&ctx, gpu_splats.n);
+    let grads = GradSplatBuffers::new(&ctx, gpu_splats.n);
+    let dl_dc_buf = ctx.storage_buffer_zeroed(
+        "dl_dc",
+        (width as u64) * (height as u64) * 16,
+    );
 
     eprintln!("[train] forward rasterising {} iterations...", cfg.iterations);
     for iter in 0..cfg.iterations {
@@ -127,6 +134,34 @@ pub fn train(
             .collect();
         let mse = mean_squared_error(&pred_rgb, &view.pixels);
 
+        // Backward pass: MSE → dL/dC, then α-blend backward, then
+        // project backward. Per-pixel loss gradient for MSE over N
+        // pixels × 3 channels: dL/dC = 2·(predicted - target) / (3·W·H).
+        let n_scalars = (width as f32) * (height as f32) * 3.0;
+        let dl_dc_vec: Vec<[f32; 4]> = pred_rgb
+            .iter()
+            .zip(view.pixels.iter())
+            .map(|(p, t)| {
+                let d = (*p - *t) * (2.0 / n_scalars);
+                [d.x, d.y, d.z, 0.0]
+            })
+            .collect();
+        ctx.queue
+            .write_buffer(&dl_dc_buf, 0, bytemuck::cast_slice(&dl_dc_vec));
+        rasterizer.zero_projected_grad(&ctx, &projected_grad, gpu_splats.n);
+        grads.zero(&ctx);
+        rasterizer.composite_backward(
+            &ctx,
+            &projected,
+            &bins.sorted_payloads,
+            &bins.tile_ranges,
+            &predicted,
+            &dl_dc_buf,
+            &projected_grad,
+            &tiling,
+        );
+        rasterizer.project_backward(&ctx, &gpu_splats, &projected_grad, &camera, &grads);
+
         // First-iteration sanity dump — lets a human spot whether the
         // rasteriser is producing anything recognisable before sitting
         // through 30k iterations.
@@ -147,8 +182,19 @@ pub fn train(
         adam_rest.t += 1;
 
         if iter % 100 == 0 || iter + 1 == cfg.iterations {
+            // Gradient-norm diagnostics — pos / opacity / sh_dc / scale.
+            // Cheap to read (small buffers); only on log iterations.
+            let n = gpu_splats.n as usize;
+            let g_pos: Vec<[f32; 4]> = ctx.readback(&grads.d_positions, n);
+            let g_op: Vec<f32> = ctx.readback(&grads.d_opacities, n);
+            let g_dc: Vec<[f32; 4]> = ctx.readback(&grads.d_sh_dc, n);
+            let g_scale: Vec<[f32; 4]> = ctx.readback(&grads.d_scales, n);
+            let norm_pos = grad_norm_vec4(&g_pos);
+            let norm_op = grad_norm_scalar(&g_op);
+            let norm_dc = grad_norm_vec4(&g_dc);
+            let norm_scale = grad_norm_vec4(&g_scale);
             eprintln!(
-                "[train] iter {iter:>5} | view {:>3}/{} | mse {mse:.4} | {} splats",
+                "[train] iter {iter:>5} | view {:>3}/{} | mse {mse:.4} | grad‖pos‖={norm_pos:.2e} ‖op‖={norm_op:.2e} ‖dc‖={norm_dc:.2e} ‖scale‖={norm_scale:.2e} | {} splats",
                 iter as usize % refs.len(),
                 refs.len(),
                 splats.len(),
@@ -173,4 +219,22 @@ fn mean_squared_error(a: &[Vec3], b: &[Vec3]) -> f32 {
         sum += (d.x * d.x + d.y * d.y + d.z * d.z) as f64;
     }
     (sum / (a.len() as f64 * 3.0)) as f32
+}
+
+/// L2 norm over a flat vec4-padded gradient buffer (w channel is padding).
+fn grad_norm_vec4(g: &[[f32; 4]]) -> f32 {
+    let mut s = 0.0_f64;
+    for v in g {
+        s += (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) as f64;
+    }
+    s.sqrt() as f32
+}
+
+/// L2 norm over a flat scalar gradient buffer.
+fn grad_norm_scalar(g: &[f32]) -> f32 {
+    let mut s = 0.0_f64;
+    for v in g {
+        s += (*v as f64) * (*v as f64);
+    }
+    s.sqrt() as f32
 }

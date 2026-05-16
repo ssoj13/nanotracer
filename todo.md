@@ -80,8 +80,20 @@ loss + densify still ahead.
         splats front-to-back into `vec4` framebuffer (xyz + coverage).
       - A2.6 — End-to-end integration in `train()`: forward rasterise
         per iteration, MSE vs reference, PNG dump on iter 0.
-- [ ] **A3 Backward pass** — gradients through α-blend back to per-splat
-      (pos, rot, scale, opacity, sh). Validate with finite differences.
+- [x] **A3 Backward pass** — gradients through α-blend back to per-splat
+      (pos, rot, scale, opacity, sh). Validated with finite differences.
+      - A3.1 — `GradSplatBuffers` + `ProjectedGrad` (48-byte per-splat
+        2D-state grad slot).
+      - A3.2 — `rasterize_backward.wgsl`: per-tile reverse α-blend with
+        CAS-based atomic-add-f32; T-clamp at >1 to handle forward
+        early-out reconstruction (numerical stability).
+      - A3.3 — `project_backward.wgsl`: chain through sigmoid, SH basis,
+        conic inverse, Σ-sandwich, quaternion derivatives, log-σ.
+      - A3.4 — Finite-difference verification (ε=1e-3, ≤ 5–10% rel):
+        sh_dc, opacity, sh_rest, pos, log-scale all parity. Catches
+        sign / scale errors in any chain rule step.
+      - A3.5 — Integrated into `train()`: forward → MSE → backward →
+        gradient-norm log. Adam updates land in A4.
 - [ ] **A4 Loss** — L1 + SSIM photometric loss vs reference views, grad
       backprop into Adam state.
 - [ ] **A5 Densify-and-prune** — split high-gradient splats, prune
