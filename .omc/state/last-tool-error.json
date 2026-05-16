@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd C:/projects/projects.rust.cg/nanotracer-rs && git worktree remove --force .claude/worktrees/agent-a5b10885ee3a5c458 2>&1 && git branch -D worktree-agent-a5b10885ee3a5c458 2>&1 && echo \\...",
-  "error": "Exit code 128\nfatal: cannot remove a locked working tree, lock reason: claude agent agent-a5b10885ee3a5c458 (pid 22988)\nuse 'remove -f -f' to override or unlock first",
-  "timestamp": "2026-05-16T06:28:53.114Z",
-  "retry_count": 1
-}
