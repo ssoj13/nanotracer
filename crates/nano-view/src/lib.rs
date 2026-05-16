@@ -16,9 +16,10 @@
 //! has been retired.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use glam::Vec3;
@@ -76,9 +77,14 @@ pub fn run_with_training(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let shared: SharedSnapshot = Arc::new(RwLock::new(None));
     let shared_w = shared.clone();
+    let paused = Arc::new(AtomicBool::new(false));
+    let paused_w = paused.clone();
 
     // Worker: run the full training loop, publishing a snapshot of
     // SplatBuffer + per-iteration stats after every Adam step.
+    // Between iterations the worker spin-sleeps if the viewer flips
+    // the `paused` flag — keeps the GPU idle while the user
+    // inspects the current splat field.
     thread::spawn(move || {
         let mut version: u64 = 0;
         let result = nano_optimize::train(&scene, &cfg, |iter, splats, mse| {
@@ -93,6 +99,9 @@ pub fn run_with_training(
                 version,
             };
             *shared_w.write().unwrap() = Some(snapshot);
+            while paused_w.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(100));
+            }
         });
         if let Err(e) = result {
             eprintln!("[train thread] error: {e}");
@@ -116,6 +125,7 @@ pub fn run_with_training(
         shared,
         history: Vec::new(),
         last_seen_version: 0,
+        paused,
     });
     // Augment the dock layout with a Training tab.
     let surface = app.dock.main_surface_mut();
@@ -129,6 +139,8 @@ struct TrainingChannel {
     shared: SharedSnapshot,
     history: Vec<f32>,
     last_seen_version: u64,
+    /// Worker checks this between iterations and sleeps while set.
+    paused: Arc<AtomicBool>,
 }
 
 /// Orbit camera around the scene centroid. LMB drag rotates,
@@ -183,6 +195,16 @@ struct UiState {
     /// Set by the Viewport tab each frame so the host knows the size
     /// of the area we should render into for the next frame.
     requested_viewport_size: [u32; 2],
+    /// Save-to-PLY UI state. `path` is the text-edit buffer; setting
+    /// `requested` to true on a button click queues a write that the
+    /// host fulfils after the egui pass closes.
+    save_path: String,
+    save_requested: bool,
+    save_last_result: Option<Result<usize, String>>,
+    /// Live-training pause toggle. Mirrored from `TrainingChannel`
+    /// before the egui pass and pushed back after.
+    training_paused: bool,
+    training_attached: bool,
 }
 
 struct ViewerApp {
@@ -193,6 +215,8 @@ struct ViewerApp {
     input: InputState,
     dock: DockState<Tab>,
     training: Option<TrainingChannel>,
+    save_path: String,
+    save_last_result: Option<Result<usize, String>>,
 }
 
 impl ViewerApp {
@@ -216,6 +240,8 @@ impl ViewerApp {
             input: InputState::default(),
             dock,
             training: None,
+            save_path: String::from("viewer_export.ply"),
+            save_last_result: None,
         }
     }
 }
@@ -405,9 +431,60 @@ impl ViewerApp {
         } else {
             None
         };
+        // Snapshot the pause flag for the UI; the frame writes any
+        // toggle back to the AtomicBool below.
+        let training_paused_before = self
+            .training
+            .as_ref()
+            .map(|ch| ch.paused.load(Ordering::Relaxed))
+            .unwrap_or(false);
+        let training_attached = self.training.is_some();
         let Some(state) = self.state.as_mut() else { return; };
-        state.frame(window, &mut self.orbit, &mut self.dock, live_stats);
+        let frame_in = FrameInputs {
+            live_stats,
+            training_paused: training_paused_before,
+            training_attached,
+            save_path: self.save_path.clone(),
+            save_last_result: self.save_last_result.take(),
+        };
+        let frame_out = state.frame(window, &mut self.orbit, &mut self.dock, frame_in);
+        // Push UI mutations back into the app state.
+        self.save_path = frame_out.save_path;
+        if let Some(ch) = self.training.as_mut()
+            && frame_out.training_paused != training_paused_before
+        {
+            ch.paused.store(frame_out.training_paused, Ordering::Relaxed);
+        }
+        // Save was requested — write the latest CPU SplatBuffer to PLY.
+        // Synchronous; ~ms per million splats, fine on the UI thread.
+        if frame_out.save_requested {
+            let path = std::path::PathBuf::from(&self.save_path);
+            let result = if let Some(state) = self.state.as_ref() {
+                let gaussians = state.last_cpu_splats.to_gaussians();
+                let n = gaussians.len();
+                nano_splat::write_ply(&path, &gaussians)
+                    .map(|()| n)
+                    .map_err(|e| format!("{e}"))
+            } else {
+                Err("viewer state not ready".to_string())
+            };
+            self.save_last_result = Some(result);
+        }
     }
+}
+
+struct FrameInputs {
+    live_stats: Option<(TrainStats, Vec<f32>)>,
+    training_paused: bool,
+    training_attached: bool,
+    save_path: String,
+    save_last_result: Option<Result<usize, String>>,
+}
+
+struct FrameOutputs {
+    save_path: String,
+    save_requested: bool,
+    training_paused: bool,
 }
 
 struct State {
@@ -419,6 +496,10 @@ struct State {
     rasterizer: Rasterizer,
     binner: TileBinner,
     gpu_splats: GpuSplatBuffer,
+    /// Latest CPU SplatBuffer — kept so the "Save PLY" button doesn't
+    /// have to read back from GPU. Synced from the initial load and
+    /// from every live-training snapshot.
+    last_cpu_splats: SplatBuffer,
 
     // Per-frame GPU resources sized to the viewport tab.
     image_w: u32,
@@ -483,6 +564,7 @@ impl State {
         let rasterizer = Rasterizer::new(&ctx);
         let binner = TileBinner::new(&ctx);
         let gpu_splats = GpuSplatBuffer::upload(&ctx, &splats);
+        let last_cpu_splats = splats;
 
         let (image_w, image_h) = DEFAULT_VIEWPORT;
         let projected = ctx.storage_buffer_zeroed(
@@ -521,6 +603,7 @@ impl State {
             rasterizer,
             binner,
             gpu_splats,
+            last_cpu_splats,
             image_w,
             image_h,
             projected,
@@ -554,7 +637,8 @@ impl State {
     /// (called when the tab is resized by dragging the dock split).
     /// Swap the GPU splat buffer for a freshly trained CPU buffer.
     /// If the count changed (densify / prune), we have to reallocate
-    /// instead of `sync_from`.
+    /// instead of `sync_from`. Always stash a copy on the CPU side so
+    /// the "Save PLY" button has zero-readback access.
     fn update_splats(&mut self, splats: SplatBuffer) {
         if splats.len() as u32 == self.gpu_splats.n {
             self.gpu_splats.sync_from(&self.ctx, &splats);
@@ -566,6 +650,7 @@ impl State {
                     * std::mem::size_of::<nano_optimize::ProjectedSplat>() as u64,
             );
         }
+        self.last_cpu_splats = splats;
     }
 
     fn resize_viewport(&mut self, new_w: u32, new_h: u32) {
@@ -593,8 +678,8 @@ impl State {
         window: &Arc<Window>,
         orbit: &mut OrbitCamera,
         dock: &mut DockState<Tab>,
-        live_stats: Option<(TrainStats, Vec<f32>)>,
-    ) {
+        frame_in: FrameInputs,
+    ) -> FrameOutputs {
         // ── Compute pass: project + bin + composite + tonemap ─────────
         let cam = CameraUniform::from_pose(
             orbit.position(),
@@ -657,7 +742,13 @@ impl State {
             distance: orbit.distance,
             target: orbit.target,
             requested_viewport_size: [self.image_w, self.image_h],
+            save_path: frame_in.save_path,
+            save_requested: false,
+            save_last_result: frame_in.save_last_result,
+            training_paused: frame_in.training_paused,
+            training_attached: frame_in.training_attached,
         };
+        let live_stats = frame_in.live_stats;
         // egui 0.34 prefers `run_ui` (yields a `&mut Ui` directly) over
         // `run` + a CentralPanel wrapper. We grab the dock style once
         // outside the closure since `global_style()` returns an Arc
@@ -691,11 +782,19 @@ impl State {
             pixels_per_point: output.pixels_per_point,
         };
 
+        // Build the outputs that the host caller pushes back into
+        // ViewerApp regardless of whether the surface present succeeds.
+        let frame_out = FrameOutputs {
+            save_path: ui_state.save_path.clone(),
+            save_requested: ui_state.save_requested,
+            training_paused: ui_state.training_paused,
+        };
+
         // ── Surface render ────────────────────────────────────────────
         let surface_tex = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            _ => return,
+            _ => return frame_out,
         };
         let surface_view = surface_tex
             .texture
@@ -751,6 +850,7 @@ impl State {
             .queue
             .submit(std::iter::once(encoder.finish()));
         surface_tex.present();
+        frame_out
     }
 }
 
@@ -814,14 +914,46 @@ impl TabViewer for DockedTabs<'_> {
                     self.state.target.x, self.state.target.y, self.state.target.z
                 ));
                 ui.separator();
+                ui.heading("Export");
+                ui.horizontal(|ui| {
+                    ui.label("Path:");
+                    ui.text_edit_singleline(&mut self.state.save_path);
+                });
+                if ui.button("💾 Save PLY").clicked() {
+                    self.state.save_requested = true;
+                }
+                if let Some(result) = &self.state.save_last_result {
+                    match result {
+                        Ok(n) => {
+                            ui.colored_label(
+                                egui::Color32::LIGHT_GREEN,
+                                format!("✓ wrote {n} splats"),
+                            );
+                        }
+                        Err(e) => {
+                            ui.colored_label(
+                                egui::Color32::LIGHT_RED,
+                                format!("✗ {e}"),
+                            );
+                        }
+                    }
+                }
+                ui.separator();
                 ui.small("LMB orbit · RMB pan · WASD / QE fly · scroll zoom · ESC quit");
             }
             Tab::Training => {
                 ui.heading("Training");
+                if self.state.training_attached {
+                    let mut paused = self.state.training_paused;
+                    if ui.checkbox(&mut paused, "⏸ Pause training").changed() {
+                        self.state.training_paused = paused;
+                    }
+                    ui.separator();
+                }
                 match self.train {
                     None => {
                         ui.label("No live training session attached.");
-                        ui.small("Run with `--train` + `--view-training` to populate this tab.");
+                        ui.small("Run with `--view-training` to populate this tab.");
                     }
                     Some((stats, history)) => {
                         ui.label(format!("Iter: {}", stats.iter));
