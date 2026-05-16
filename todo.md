@@ -133,10 +133,19 @@ background, gamma-correct output. Blocked on A2 (shared kernel).
 - [ ] **B2 Training-time live preview.** Reuse B1's window + pipeline.
       Flag `--view-training`: during `train()` the window shows the
       current predicted frame from a fixed reference camera, refreshed
-      every N iterations. Surface present runs on a separate command
-      pool from training compute so they don't serialise. Side panel:
-      live loss curve (L1 + SSIM), iteration counter, splat-count
-      trend. Useful for spotting divergence early.
+      every N iterations. Two architectural options for the next pass:
+        1. **Threaded** — spawn the training loop on a worker thread,
+           shield the `SplatBuffer` behind `Arc<RwLock<…>>`, viewer
+           thread re-uploads to GPU each frame. wgpu `Device` and
+           `Queue` are `Send+Sync` so a single device works for both;
+           trainer + viewer can share or run their own. Cleanest, but
+           introduces multi-threading lifecycle.
+        2. **Pump-events** — use winit 0.30 `EventLoop::pump_app_events`
+           to interleave one training iteration with one viewer-event
+           cycle on the main thread. Simpler thread model, slightly
+           less responsive UI under heavy iterations.
+      Either way needs a side panel: live loss curve, iteration
+      counter, splat-count trend. Useful for spotting divergence early.
 - [x] **A1 extension — multi-view camera in renderer.** `RenderConfig`
       now carries `camera_pos / camera_target / camera_up`; the shader
       consumes `inv_view`; `bake_references` produces distinct frames.
