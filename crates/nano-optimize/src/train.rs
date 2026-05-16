@@ -49,13 +49,15 @@ pub struct TrainConfig {
 
 /// Run the optimisation loop and return the final splat buffer.
 ///
-/// Phase A2.6 — forward rasteriser only. Adam state advances but no
-/// gradient is applied. The returned `SplatBuffer` is identical to the
-/// seed; backward (A3) and Adam updates (A3/A4) make this stage start
-/// shaping the splats.
-pub fn train(
+/// `on_iter` is invoked at the end of every iteration with
+/// `(iter_index, &updated_splats, mse_for_this_iter)`. Pass a no-op
+/// closure for the headless training path; the viewer wires this up
+/// to publish a snapshot into a shared `RwLock` so the live preview
+/// stays in sync with the training thread.
+pub fn train<F: FnMut(u32, &SplatBuffer, f32)>(
     scene: &Scene,
     cfg: &TrainConfig,
+    mut on_iter: F,
 ) -> Result<SplatBuffer, Box<dyn std::error::Error>> {
     eprintln!(
         "[train] baking {} reference views at {}×{}...",
@@ -327,6 +329,12 @@ pub fn train(
         } else {
             gpu_splats.sync_from(&ctx, &splats);
         }
+
+        // Notify the caller (live viewer / metrics collector) with a
+        // snapshot of the updated splats + MSE. Headless paths pass a
+        // no-op closure; viewer paths copy `splats` into an
+        // `Arc<RwLock<…>>` for cross-thread access.
+        on_iter(iter, &splats, mse);
 
         if iter % 100 == 0 || iter + 1 == cfg.iterations {
             // Gradient-norm diagnostics — pos / opacity / sh_dc / scale.

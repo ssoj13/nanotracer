@@ -126,26 +126,18 @@ background, gamma-correct output. Blocked on A2 (shared kernel).
       tonemap + sRGB encode + `write_texture` (simple, slow-ish; a
       GPU-only tonemap+blit shader pair is a follow-up). CLI:
       `--view` after `--splats out.ply` (or with `--train`). ESC quits.
-- [ ] **B1.x PLY loader + WASD / pan + HUD.** Read existing 3DGS
-      `.ply` files (nano-splat already has the `Gaussian` Pod,
-      needs the parser). Add RMB-pan, WASD fly-mode, FoV slider, FPS
-      / frame-time / splat-count overlay.
-- [ ] **B2 Training-time live preview.** Reuse B1's window + pipeline.
-      Flag `--view-training`: during `train()` the window shows the
-      current predicted frame from a fixed reference camera, refreshed
-      every N iterations. Two architectural options for the next pass:
-        1. **Threaded** — spawn the training loop on a worker thread,
-           shield the `SplatBuffer` behind `Arc<RwLock<…>>`, viewer
-           thread re-uploads to GPU each frame. wgpu `Device` and
-           `Queue` are `Send+Sync` so a single device works for both;
-           trainer + viewer can share or run their own. Cleanest, but
-           introduces multi-threading lifecycle.
-        2. **Pump-events** — use winit 0.30 `EventLoop::pump_app_events`
-           to interleave one training iteration with one viewer-event
-           cycle on the main thread. Simpler thread model, slightly
-           less responsive UI under heavy iterations.
-      Either way needs a side panel: live loss curve, iteration
-      counter, splat-count trend. Useful for spotting divergence early.
+- [x] **B1.x PLY loader + WASD / pan + HUD.** `nano_splat::read_ply`
+      reads Inria binary PLY; `--view-ply scene.ply` CLI fast path.
+      RMB-pan, WASD/QE fly mode, FoV slider, FPS/frame-time/splat
+      count Inspector tab — all in egui_dock layout.
+- [x] **B2 Training-time live preview.** `--view-training` spawns a
+      worker thread that runs `train()` to completion; the viewer
+      polls a shared `Arc<RwLock<Option<TrainSnapshot>>>` snapshot
+      every frame, re-uploads the splats to its GPU buffer (full
+      realloc on densify count changes, `sync_from` otherwise), and
+      shows iter / MSE / splat-count + a live `egui_plot` loss curve
+      in a `Training` dock tab. Viewer-side history is appended each
+      time a new snapshot version arrives.
 - [x] **A1 extension — multi-view camera in renderer.** `RenderConfig`
       now carries `camera_pos / camera_target / camera_up`; the shader
       consumes `inv_view`; `bake_references` produces distinct frames.

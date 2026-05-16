@@ -6,6 +6,7 @@ license.workspace = true
 description = "Interactive PLY splat viewer (winit + wgpu surface, reuses the nano-optimize rasteriser)."
 
 [dependencies]
+nano-core     = { workspace = true }
 nano-optimize = { workspace = true }
 nano-splat    = { workspace = true }
 glam          = { workspace = true }

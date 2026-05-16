@@ -16,14 +16,16 @@
 //! has been retired.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::thread;
 use std::time::Instant;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use glam::Vec3;
+use nano_core::scene::Scene;
 use nano_optimize::raster::CameraUniform;
 use nano_optimize::splat_gpu::GpuSplatBuffer;
-use nano_optimize::{Rasterizer, SplatBuffer, TileBinner, TilingParams, WgpuCtx};
+use nano_optimize::{Rasterizer, SplatBuffer, TileBinner, TilingParams, TrainConfig, WgpuCtx};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -38,6 +40,95 @@ pub fn run(splats: SplatBuffer) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = ViewerApp::new(splats);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Per-iteration snapshot published by the training thread.
+#[derive(Clone, Default)]
+pub struct TrainStats {
+    pub iter: u32,
+    pub mse: f32,
+    pub splat_count: u32,
+}
+
+struct TrainSnapshot {
+    splats: SplatBuffer,
+    stats: TrainStats,
+    /// Monotonic version number; viewer reads it cheaply to decide
+    /// whether to re-upload.
+    version: u64,
+}
+
+type SharedSnapshot = Arc<RwLock<Option<TrainSnapshot>>>;
+
+/// Spawn a background training thread on `scene` + `cfg`, then open
+/// the viewer with a live `Training` dock tab showing the loss curve
+/// and per-iteration stats. The viewport stays in sync with the
+/// training thread by polling a shared `Arc<RwLock<...>>` snapshot
+/// each frame and re-uploading whenever a new version is published.
+///
+/// Blocks until the user closes the window. The training thread
+/// runs to completion (or until the window closes, whichever first);
+/// when the window closes the worker is detached and finishes on
+/// its own.
+pub fn run_with_training(
+    scene: Scene,
+    cfg: TrainConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let shared: SharedSnapshot = Arc::new(RwLock::new(None));
+    let shared_w = shared.clone();
+
+    // Worker: run the full training loop, publishing a snapshot of
+    // SplatBuffer + per-iteration stats after every Adam step.
+    thread::spawn(move || {
+        let mut version: u64 = 0;
+        let result = nano_optimize::train(&scene, &cfg, |iter, splats, mse| {
+            version = version.wrapping_add(1);
+            let snapshot = TrainSnapshot {
+                splats: splats.clone(),
+                stats: TrainStats {
+                    iter,
+                    mse,
+                    splat_count: splats.len() as u32,
+                },
+                version,
+            };
+            *shared_w.write().unwrap() = Some(snapshot);
+        });
+        if let Err(e) = result {
+            eprintln!("[train thread] error: {e}");
+        }
+    });
+
+    // Block briefly for the first snapshot — the worker has to bake
+    // reference views + forward-fit before the first Adam step, which
+    // takes a few seconds on a typical scene. Spinning here keeps the
+    // ApplicationHandler shape simple (it always sees splats).
+    let initial_splats = loop {
+        if let Some(snap) = shared.read().unwrap().as_ref() {
+            break snap.splats.clone();
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    };
+
+    let event_loop = EventLoop::new()?;
+    let mut app = ViewerApp::new(initial_splats);
+    app.training = Some(TrainingChannel {
+        shared,
+        history: Vec::new(),
+        last_seen_version: 0,
+    });
+    // Augment the dock layout with a Training tab.
+    let surface = app.dock.main_surface_mut();
+    surface.split_below(NodeIndex::root().right(), 0.5, vec![Tab::Training]);
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+/// Holds the viewer-side state for a live training session.
+struct TrainingChannel {
+    shared: SharedSnapshot,
+    history: Vec<f32>,
+    last_seen_version: u64,
 }
 
 /// Orbit camera around the scene centroid. LMB drag rotates,
@@ -75,6 +166,7 @@ struct InputState {
 enum Tab {
     Viewport,
     Inspector,
+    Training,
 }
 
 /// Per-frame UI state shared between the dock tabs.
@@ -100,6 +192,7 @@ struct ViewerApp {
     orbit: OrbitCamera,
     input: InputState,
     dock: DockState<Tab>,
+    training: Option<TrainingChannel>,
 }
 
 impl ViewerApp {
@@ -122,6 +215,7 @@ impl ViewerApp {
             },
             input: InputState::default(),
             dock,
+            training: None,
         }
     }
 }
@@ -285,8 +379,31 @@ impl ApplicationHandler for ViewerApp {
 
 impl ViewerApp {
     fn frame(&mut self, window: &Arc<Window>) {
+        // Pull the latest training snapshot, if any.
+        let live_stats = if let Some(ch) = self.training.as_mut() {
+            let snap_ready = {
+                let guard = ch.shared.read().unwrap();
+                guard
+                    .as_ref()
+                    .map(|s| (s.version, s.splats.clone(), s.stats.clone()))
+            };
+            if let Some((v, splats, stats)) = snap_ready {
+                if v > ch.last_seen_version {
+                    ch.last_seen_version = v;
+                    ch.history.push(stats.mse);
+                    if let Some(state) = self.state.as_mut() {
+                        state.update_splats(splats);
+                    }
+                }
+                Some((stats, ch.history.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let Some(state) = self.state.as_mut() else { return; };
-        state.frame(window, &mut self.orbit, &mut self.dock);
+        state.frame(window, &mut self.orbit, &mut self.dock, live_stats);
     }
 }
 
@@ -432,6 +549,22 @@ impl State {
 
     /// Reallocate the render targets to match the viewport tab's size
     /// (called when the tab is resized by dragging the dock split).
+    /// Swap the GPU splat buffer for a freshly trained CPU buffer.
+    /// If the count changed (densify / prune), we have to reallocate
+    /// instead of `sync_from`.
+    fn update_splats(&mut self, splats: SplatBuffer) {
+        if splats.len() as u32 == self.gpu_splats.n {
+            self.gpu_splats.sync_from(&self.ctx, &splats);
+        } else {
+            self.gpu_splats = GpuSplatBuffer::upload(&self.ctx, &splats);
+            self.projected = self.ctx.storage_buffer_zeroed(
+                "view-projected",
+                (self.gpu_splats.n as u64)
+                    * std::mem::size_of::<nano_optimize::ProjectedSplat>() as u64,
+            );
+        }
+    }
+
     fn resize_viewport(&mut self, new_w: u32, new_h: u32) {
         if (new_w, new_h) == (self.image_w, self.image_h) {
             return;
@@ -452,7 +585,13 @@ impl State {
             );
     }
 
-    fn frame(&mut self, window: &Arc<Window>, orbit: &mut OrbitCamera, dock: &mut DockState<Tab>) {
+    fn frame(
+        &mut self,
+        window: &Arc<Window>,
+        orbit: &mut OrbitCamera,
+        dock: &mut DockState<Tab>,
+        live_stats: Option<(TrainStats, Vec<f32>)>,
+    ) {
         // ── Compute pass: project + bin + composite + tonemap ─────────
         let cam = CameraUniform::from_pose(
             orbit.position(),
@@ -518,7 +657,10 @@ impl State {
         };
         let output = self.egui_ctx.clone().run(raw_input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let mut viewer = DockedTabs { state: &mut ui_state };
+                let mut viewer = DockedTabs {
+                    state: &mut ui_state,
+                    train: live_stats.as_ref(),
+                };
                 DockArea::new(dock)
                     .style(Style::from_egui(ctx.style().as_ref()))
                     .show_inside(ui, &mut viewer);
@@ -608,6 +750,7 @@ impl State {
 /// egui_dock `TabViewer` impl — drawing logic for each tab kind.
 struct DockedTabs<'a> {
     state: &'a mut UiState,
+    train: Option<&'a (TrainStats, Vec<f32>)>,
 }
 
 impl TabViewer for DockedTabs<'_> {
@@ -617,6 +760,7 @@ impl TabViewer for DockedTabs<'_> {
         match tab {
             Tab::Viewport => "Viewport".into(),
             Tab::Inspector => "Inspector".into(),
+            Tab::Training => "Training".into(),
         }
     }
 
@@ -664,6 +808,34 @@ impl TabViewer for DockedTabs<'_> {
                 ));
                 ui.separator();
                 ui.small("LMB orbit · RMB pan · WASD / QE fly · scroll zoom · ESC quit");
+            }
+            Tab::Training => {
+                ui.heading("Training");
+                match self.train {
+                    None => {
+                        ui.label("No live training session attached.");
+                        ui.small("Run with `--train` + `--view-training` to populate this tab.");
+                    }
+                    Some((stats, history)) => {
+                        ui.label(format!("Iter: {}", stats.iter));
+                        ui.label(format!("MSE:  {:.6}", stats.mse));
+                        ui.label(format!("Splats: {}", stats.splat_count));
+                        ui.separator();
+                        egui_plot::Plot::new("loss_curve")
+                            .view_aspect(2.0)
+                            .show_axes([true, true])
+                            .allow_drag(true)
+                            .allow_zoom(true)
+                            .show(ui, |plot_ui| {
+                                let pts: egui_plot::PlotPoints = history
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, m)| [i as f64, *m as f64])
+                                    .collect();
+                                plot_ui.line(egui_plot::Line::new("MSE", pts));
+                            });
+                    }
+                }
             }
         }
     }

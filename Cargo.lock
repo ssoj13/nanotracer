@@ -1709,6 +1709,7 @@ dependencies = [
  "egui_dock",
  "egui_plot",
  "glam",
+ "nano-core",
  "nano-optimize",
  "nano-splat",
  "pollster",

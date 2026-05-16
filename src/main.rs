@@ -212,6 +212,13 @@ struct Args {
     /// Bypasses scene generation / training entirely.
     #[arg(long = "view-ply")]
     view_ply: Option<String>,
+
+    /// Open the viewer with a live training preview. Spawns the
+    /// `train()` loop on a worker thread; the viewer polls a shared
+    /// snapshot every frame and updates the splat texture as Adam +
+    /// densify reshape the cloud. Implies `--train`.
+    #[arg(long = "view-training", default_value_t = false)]
+    view_training: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -384,7 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             seed: scene_seed,
         };
 
-        let gaussians = if args.train {
+        let gaussians = if args.train || args.view_training {
             println!(
                 "Training enabled: {} iterations, {} reference views at {}×{}",
                 args.train_iters, args.train_views, args.train_width, args.train_height,
@@ -408,7 +415,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 adam_attr: AdamConfig::default(),
             };
-            let splats = run_training(&scene, &train_cfg)?;
+            if args.view_training {
+                println!(
+                    "Opening live-training viewer (ESC to quit; closes detaches worker)..."
+                );
+                // run_with_training blocks until window close; the
+                // background thread runs train() to completion (or is
+                // detached when the window closes). On exit we don't
+                // try to write a PLY — that's the trainer's own
+                // responsibility if it finishes first.
+                nano_view::run_with_training(scene, train_cfg)?;
+                return Ok(());
+            }
+            let splats = run_training(&scene, &train_cfg, |_, _, _| {})?;
             splats.to_gaussians()
         } else {
             generate_splats_gpu(&scene, &config)?
