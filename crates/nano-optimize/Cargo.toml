@@ -7,6 +7,7 @@ description = "3DGS-style gradient-based splat optimizer (wgpu rasterizer + Adam
 
 [dependencies]
 nano-core   = { workspace = true }
+nano-io     = { workspace = true }
 nano-render = { workspace = true }
 nano-splat  = { workspace = true }
 glam        = { workspace = true }
