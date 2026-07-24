@@ -43,6 +43,7 @@ impl WgpuCtx {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false, // wgpu 30
             })
             .await
             .map_err(|e| format!("no compatible GPU adapter: {e}"))?;
@@ -143,7 +144,7 @@ impl WgpuCtx {
             })
             .expect("device poll");
         rx.recv().expect("map_async channel").expect("map_async");
-        let view = slice.get_mapped_range();
+        let view = slice.get_mapped_range().expect("get_mapped_range");
         let out: Vec<T> = bytemuck::cast_slice::<u8, T>(&view).to_vec();
         drop(view);
         staging.unmap();

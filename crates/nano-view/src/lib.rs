@@ -611,6 +611,7 @@ impl State {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false, // wgpu 30
         }))?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -924,7 +925,7 @@ impl State {
             self.egui_renderer.free_texture(id);
         }
         self.ctx.queue.submit(std::iter::once(encoder.finish()));
-        surface_tex.present();
+        self.ctx.queue.present(surface_tex); // wgpu 30: Queue::present
         frame_out
     }
 }
@@ -1091,6 +1092,7 @@ fn configure_surface(
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode,
+            color_space: wgpu::SurfaceColorSpace::Auto, // wgpu 30
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         },

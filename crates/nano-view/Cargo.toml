@@ -20,10 +20,10 @@ pollster      = { workspace = true }
 # binding; otherwise cargo will pull both. The user-facing `nano-view`
 # only re-exports types through the shared device, so a duplicate
 # wgpu crate would refuse to link.
-egui       = "0.34"
-egui-wgpu  = { version = "0.34", default-features = false, features = ["winit"] }
-egui-winit = { version = "0.34", default-features = false }
-egui_dock  = { version = "0.19", features = ["serde"] }
-egui_plot  = "0.35"
+egui = "0.35"
+egui-wgpu = { version = "0.35", default-features = false, features = ["winit"] }
+egui-winit = { version = "0.35", default-features = false }
+egui_dock = { version = "0.20", features = ["serde"] }
+egui_plot = "0.36"
 serde      = { version = "1", features = ["derive"] }
 ron        = "0.8"

@@ -37,7 +37,7 @@ gltf      = "1.4"
 # crates stay on `ash` because they need stable hardware ray-query
 # (VK_KHR_ray_query). When wgpu's RAY_QUERY moves out of experimental we can
 # consolidate — see WGPU_RESEARCH.md.
-wgpu      = "29"
+wgpu = "30"
 pollster  = "0.4"
 
 # In-workspace crates (referenced by path so the bin and crates pick them up).
@@ -75,3 +75,17 @@ gpu-mem       = { workspace = true }
 glam          = { workspace = true }
 clap          = { workspace = true }
 fastrand      = { workspace = true }
+
+# egui/wgpu 30 pin — WHY/HOW: see colmap-rs/docs/egui-wgpu-bump.md. Redirects the egui family (incl.
+# transitive egui from egui_dock/phosphor/snarl) to emilk/egui rev d28929ec7225205100590fce2836f885bc9ba688 (0.35.0 on wgpu 30).
+[patch.crates-io]
+egui                 = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+egui-wgpu            = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+egui-winit           = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+eframe               = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+egui_extras          = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+egui_glow            = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+ecolor               = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+epaint               = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+emath                = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+epaint_default_fonts = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
