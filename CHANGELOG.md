@@ -5,6 +5,18 @@ Notable changes to `nanotracer-rs`. Format follows
 uses calendar-style milestone notes rather than strict SemVer until
 Plan A stabilises.
 
+## 2026-10-04 — EXR through exr-core
+
+### Changed
+
+- `EnvironmentMap::from_exr` reads through `exr-core` (exr-rs, our 1:1
+  OpenEXR port) instead of crates.io `exr`: the R, G, B channels of a
+  flat file, any channel type widened to f32. A file without all three
+  is now an error rather than a silently filled default.
+- The workspace `image` dependency no longer takes `image`'s default
+  features (which pulled crates.io `exr`); its format set comes from
+  `exr-image`. `cargo tree -i exr` is empty.
+
 ## 2026-05-15 — Plan A complete + interactive viewer
 
 End-to-end 3DGS training pipeline (forward rasteriser → backward pass →
