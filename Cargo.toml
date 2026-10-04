@@ -24,9 +24,13 @@ license = "MIT"
 
 [workspace.dependencies]
 glam      = "0.32"
-image     = "0.25"
+# `image` formats come from exr-image (image's default set minus `exr`); EXR goes through exr-core,
+# never crates.io `exr`.
+image     = { version = "0.25", default-features = false }
+exr-image = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
+exr-core  = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
+imath-rs  = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
 clap      = { version = "4.6", features = ["derive"] }
-exr       = "1.74"
 fastrand  = "2.4"
 ash       = "0.38"
 shaderc   = "0.10"

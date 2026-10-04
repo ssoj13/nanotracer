@@ -7,5 +7,8 @@ description = "Scene / geometry / mesh / material / colour model for nanotracer-
 
 [dependencies]
 glam     = { workspace = true }
-exr      = { workspace = true }
+exr-core = { workspace = true }
 bytemuck = { workspace = true }
+
+[dev-dependencies]
+imath-rs = { workspace = true }

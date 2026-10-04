@@ -38,30 +38,24 @@ pub struct EnvGpuData {
 }
 
 impl EnvironmentMap {
-    /// Load an EXR HDR environment map. Loads the first RGBA layer; exposure
-    /// is applied later on the GPU when sampling.
+    /// Load an EXR HDR environment map: the R, G, B channels of a single-part
+    /// flat file through exr-core (our OpenEXR port), any channel type widened
+    /// to f32. A file without all three is an error. Exposure is applied later
+    /// on the GPU when sampling.
     pub fn from_exr(path: &str, exposure: f32) -> Result<Self, Box<dyn std::error::Error>> {
-        use exr::prelude::*;
-
-        let image = read_first_rgba_layer_from_file(
-            path,
-            |resolution, _| {
-                let width = resolution.width() as u32;
-                let height = resolution.height() as u32;
-                vec![Vec3::ZERO; (width * height) as usize]
-            },
-            |pixel_vector, position, (r, g, b, _a): (f32, f32, f32, f32)| {
-                let width = position.width();
-                let index = position.y() * width + position.x();
-                if index < pixel_vector.len() {
-                    pixel_vector[index] = Vec3::new(r, g, b);
-                }
-            },
-        )?;
-
-        let width = image.layer_data.size.width() as u32;
-        let height = image.layer_data.size.height() as u32;
-        let data = image.layer_data.channel_data.pixels;
+        let image = exr_core::Image::read(path)?;
+        let (width, height) = (u32::try_from(image.width())?, u32::try_from(image.height())?);
+        let plane = |name: &str| -> Result<Vec<f32>, String> {
+            if image.sampling(name).is_some_and(|s| s != (1, 1)) {
+                return Err(format!("EXR {path}: channel {name} is subsampled"));
+            }
+            image
+                .channel(name)
+                .map(exr_core::ChannelData::to_f32)
+                .ok_or_else(|| format!("EXR {path}: no {name} channel (an RGB image is required)"))
+        };
+        let (r, g, b) = (plane("R")?, plane("G")?, plane("B")?);
+        let data: Vec<Vec3> = r.iter().zip(&g).zip(&b).map(|((r, g), b)| Vec3::new(*r, *g, *b)).collect();
 
         let max_luminance = data
             .iter()
@@ -245,5 +239,25 @@ mod tests {
         }
         assert!(min_z < -0.9, "min z = {min_z} (lower hemisphere missing)");
         assert!(max_z > 0.9, "max z = {max_z} (upper hemisphere missing)");
+    }
+
+    #[test]
+    fn exr_environment_keeps_hdr_radiance_through_exr_core() {
+        use exr_core::attr::Compression;
+        use exr_core::{ChannelData, Image};
+        use imath_rs::{Box2i, V2i};
+
+        let path = std::env::temp_dir().join(format!("nano-env-{}.exr", std::process::id()));
+        let window = Box2i { min: V2i { x: 0, y: 0 }, max: V2i { x: 1, y: 0 } };
+        Image::new(window)
+            .with_channel("R", ChannelData::Float(vec![19.43, 0.0]))
+            .with_channel("G", ChannelData::Float(vec![2.0, 0.5]))
+            .with_channel("B", ChannelData::Float(vec![0.125, 1e-6]))
+            .write(&path, Compression::Zip)
+            .unwrap();
+        let env = EnvironmentMap::from_exr(path.to_str().unwrap(), 1.0).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((env.width(), env.height()), (2, 1));
+        assert_eq!(env.data, vec![Vec3::new(19.43, 2.0, 0.125), Vec3::new(0.0, 0.5, 1e-6)]);
     }
 }

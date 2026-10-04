@@ -10,3 +10,5 @@ nano-core = { workspace = true }
 glam      = { workspace = true }
 gltf      = { workspace = true }
 image     = { workspace = true }
+# Supplies the `image` format set (image's default minus crates.io `exr`).
+exr-image = { workspace = true }
