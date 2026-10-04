@@ -23,7 +23,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-glam      = "0.32"
+glam      = "0.33.2"
 # `image` formats come from exr-image (image's default set minus `exr`); EXR goes through exr-core,
 # never crates.io `exr`.
 image     = { version = "0.25", default-features = false }
@@ -31,7 +31,7 @@ exr-image = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
 exr-core  = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
 imath-rs  = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
 clap      = { version = "4.6", features = ["derive"] }
-fastrand  = "2.4"
+fastrand  = "2.5"
 ash       = "0.38"
 shaderc   = "0.10"
 bytemuck  = { version = "1.25", features = ["derive"] }
@@ -42,7 +42,7 @@ gltf      = "1.4"
 # (VK_KHR_ray_query). When wgpu's RAY_QUERY moves out of experimental we can
 # consolidate — see WGPU_RESEARCH.md.
 wgpu = "30"
-pollster  = "0.4"
+pollster  = "1.0"
 
 # In-workspace crates (referenced by path so the bin and crates pick them up).
 gpu-mem       = { path = "crates/gpu-mem" }
@@ -80,16 +80,4 @@ glam          = { workspace = true }
 clap          = { workspace = true }
 fastrand      = { workspace = true }
 
-# egui/wgpu 30 pin — WHY/HOW: see colmap-rs/docs/egui-wgpu-bump.md. Redirects the egui family (incl.
-# transitive egui from egui_dock/phosphor/snarl) to emilk/egui rev d28929ec7225205100590fce2836f885bc9ba688 (0.35.0 on wgpu 30).
-[patch.crates-io]
-egui                 = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-egui-wgpu            = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-egui-winit           = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-eframe               = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-egui_extras          = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-egui_glow            = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-ecolor               = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-epaint               = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-emath                = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
-epaint_default_fonts = { git = "https://github.com/emilk/egui", rev = "d28929ec7225205100590fce2836f885bc9ba688" }
+

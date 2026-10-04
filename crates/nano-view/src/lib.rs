@@ -183,7 +183,7 @@ struct InputState {
     e: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 enum Tab {
     Viewport,
     Inspector,
@@ -884,9 +884,12 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("egui-encoder"),
             });
-        for (id, delta) in &output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.ctx.device, &self.ctx.queue, *id, delta);
+        // egui 0.36 batches a frame's deltas per texture; apply them in order.
+        for (id, deltas) in &output.textures_delta.set {
+            for delta in deltas {
+                self.egui_renderer
+                    .update_texture(&self.ctx.device, &self.ctx.queue, *id, delta);
+            }
         }
         self.egui_renderer.update_buffers(
             &self.ctx.device,
@@ -938,6 +941,10 @@ struct DockedTabs<'a> {
 
 impl TabViewer for DockedTabs<'_> {
     type Tab = Tab;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(*tab)
+    }
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {

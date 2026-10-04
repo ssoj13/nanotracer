@@ -35,7 +35,7 @@ pub struct ReferenceView {
 impl ReferenceView {
     /// World → camera-space matrix for splat-rasteriser projection.
     pub fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.camera_pos, self.target, self.up)
+        glam::camera::rh::view::look_at_mat4(self.camera_pos, self.target, self.up)
     }
 
     /// Perspective projection matrix matching the renderer's pinhole model.
@@ -43,7 +43,7 @@ impl ReferenceView {
     /// the splat rasteriser sorts front-to-back so it depends on consistent Z.
     pub fn proj_matrix(&self, near: f32, far: f32) -> Mat4 {
         let aspect = self.width as f32 / self.height as f32;
-        Mat4::perspective_rh(self.fov_y, aspect, near, far)
+        glam::camera::rh::proj::directx::perspective(self.fov_y, aspect, near, far)
     }
 }
 

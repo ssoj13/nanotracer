@@ -238,7 +238,7 @@ pub fn render(scene: &Scene, config: &RenderConfig) -> Result<Vec<Vec3>, Box<dyn
         // the env-irradiance SH is uploaded at full physical scale and
         // multiplied by the explicit env-light intensity in the shader.
         irradiance_sh: env_data.irradiance_sh,
-        inv_view: glam::Mat4::look_at_rh(config.camera_pos, config.camera_target, config.camera_up)
+        inv_view: glam::camera::rh::view::look_at_mat4(config.camera_pos, config.camera_target, config.camera_up)
             .inverse()
             .to_cols_array_2d(),
     };

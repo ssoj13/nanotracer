@@ -13,7 +13,7 @@
 //! so unit tests can verify per-splat parity to ~1e-3.
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 
 use crate::gpu::WgpuCtx;
 use crate::splat_gpu::GpuSplatBuffer;
@@ -85,7 +85,7 @@ impl CameraUniform {
         height: u32,
         n_splats: u32,
     ) -> Self {
-        let view = Mat4::look_at_rh(camera_pos, target, up);
+        let view = glam::camera::rh::view::look_at_mat4(camera_pos, target, up);
         let focal = (height as f32) / (2.0 * (fov_y * 0.5).tan());
         Self {
             view: view.to_cols_array_2d(),

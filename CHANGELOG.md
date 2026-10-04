@@ -5,6 +5,16 @@ Notable changes to `nanotracer-rs`. Format follows
 uses calendar-style milestone notes rather than strict SemVer until
 Plan A stabilises.
 
+## 2026-10-04 — dependencies on their latest releases
+
+### Changed
+- egui/eframe 0.36 from crates.io: the `[patch.crates-io]` bridge to an egui 0.35 git rev is gone
+  (one egui in the graph). egui_dock 0.21 (`TabViewer::id`), egui_plot 0.37; texture deltas are
+  applied per texture in order (egui 0.36 batches them).
+- glam 0.32 -> 0.33.2 (the shared cglibs line); cameras use `glam::camera` (the `Mat4`
+  constructors are deprecated in 0.33, gone in 0.34). ron 0.12, pollster 1.0, full lock refresh
+  including our git crates on `main`. 66 tests pass.
+
 ## 2026-10-04 — EXR through exr-core
 
 ### Changed
